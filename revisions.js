@@ -1,6 +1,7 @@
 import * as core from '../../../../script.js';
 import { getContext } from '../../../extensions.js';
 import { SWIPE_DIRECTION, SWIPE_SOURCE } from '../../../constants.js';
+import { restoreMvu, commitMvu, mergeSwipeVariables, syncMvuChat, mvuTransaction } from './mvu-compat.js';
 
 export const REVISION = 'auto_rewrite_revision';
 export const TEMP = 'auto_rewrite_temporary';
@@ -154,7 +155,9 @@ export async function collapse(job, result) {
     final.swipes = [...original.swipes, final.mes];
     final.swipe_id = rewrittenSwipe;
     final.swipe_info = [...original.swipe_info, info(final)];
+    mergeSwipeVariables(original, result, final);
     ctx.chat.splice(job.index, ctx.chat.length - job.index, final);
+    commitMvu(job, final);
     job.settled = true;
     await ctx.saveChat();
     forget(job);
@@ -173,9 +176,24 @@ export async function collapse(job, result) {
 }
 
 export async function restore(job) {
-    if (!job.feedback) { forget(job); return true; }
     const ctx = getContext();
-    if (!ownsTail(job, ctx)) return false;
+    if (!job.feedback) {
+        if (keyOf(ctx) === job.key && ctx.chat[job.index] === job.source && mvuTransaction(job.source)) {
+            restoreMvu(job);
+            await ctx.saveChat();
+        }
+        forget(job); return true;
+    }
+    if (!ownsTail(job, ctx)) {
+        // Another turn may have taken over. Undo our source snapshot without
+        // rolling back newer messages or their current chat-variable mirror.
+        if (keyOf(ctx) === job.key && ctx.chat[job.index] === job.source && mvuTransaction(job.source)) {
+            restoreMvu(job, { restoreChat: false });
+            await ctx.saveChat();
+        }
+        return false;
+    }
+    restoreMvu(job);
     ctx.chat.splice(job.index + 1);
     job.settled = true;
     await ctx.saveChat();
@@ -191,7 +209,17 @@ export async function restore(job) {
 export async function recover() {
     const ctx = getContext();
     let saved;
-    try { saved = JSON.parse(sessionStorage.getItem(RECEIPT + keyOf(ctx)) || 'null'); } catch { return false; }
+    try { saved = JSON.parse(sessionStorage.getItem(RECEIPT + keyOf(ctx)) || 'null'); } catch { /* Use the persisted MVU transaction below. */ }
+    if (!saved) {
+        const index = ctx.chat.findIndex((message, i) => {
+            const transaction = mvuTransaction(message);
+            return transaction && ctx.chat[i + 1]?.extra?.[TEMP]?.id === transaction.id;
+        });
+        if (index >= 0) {
+            const transaction = mvuTransaction(ctx.chat[index]);
+            saved = { id: transaction.id, index, sourceSwipe: transaction.swipe, sourceHash: fingerprint(ctx.chat[index].mes ?? '') };
+        }
+    }
     if (!saved || !Number.isInteger(saved.index)) return false;
     const source = ctx.chat[saved.index];
     const feedback = ctx.chat[saved.index + 1];
@@ -226,6 +254,7 @@ export async function jumpVersion(reply, target) {
     await ctx.swipe.to(null, target < reply.swipeId ? SWIPE_DIRECTION.LEFT : SWIPE_DIRECTION.RIGHT,
         { source: SWIPE_SOURCE.SWIPE_PICKER, forceMesId: reply.index, forceSwipeId: target, forceDuration: 0 });
     if (keyOf(getContext()) === reply.key) {
+        syncMvuChat(message);
         await redraw(reply.index, reply.key);
         await ctx.saveChat();
     }

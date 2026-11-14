@@ -5,6 +5,7 @@ import { hasPendingFileAttachment } from '../../../chats.js';
 import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { createRewriteUI } from './ui.js';
 import { createModelRouting } from './model-routing.js';
+import { mvuBusy, mvuFeedback, prepareMvu, resetMvuFeedback, finishMvu, syncMvuChat, waitMvuWindow } from './mvu-compat.js';
 import { REVISION, TEMP, remember, collapse, restore, recover, markStaging, liveReply, showStaging, versionLink, jumpVersion } from './revisions.js';
 
 const KEY = 'rewrite_writer';
@@ -23,6 +24,7 @@ let pending;
 let running;
 let timer;
 let sequence = 0;
+let mvuReadyAt = 0;
 let status = '等待下一次生成';
 const subscriptions = [];
 const routing = createModelRouting();
@@ -54,7 +56,7 @@ function isIdle(ctx = getContext()) {
     // core releases it entirely; no private finalization flag or core patch is needed.
     return !core.is_send_press && !core.isChatSaving && !ctx.streamingProcessor
         && (core.swipeState == null || core.swipeState === SWIPE_STATE.NONE)
-        && !document.querySelector('.mes_edit_textarea');
+        && !document.querySelector('.mes_edit_textarea') && !mvuBusy();
 }
 
 function setStatus(text) {
@@ -68,12 +70,12 @@ function clearPending() {
     pending = null;
 }
 
-function matches(attempt, ctx = getContext()) {
+function matches(attempt, ctx = getContext(), checkText = true) {
     const last = ctx.chat.at(-1);
     return chatKey(ctx) === attempt.key && isSingleChat(ctx)
         && last === attempt.message && !last.is_user && !last.is_system
         && ctx.chat.length - 1 === attempt.index
-        && (last.swipe_id ?? 0) === attempt.swipeId && last.mes === attempt.text;
+        && (last.swipe_id ?? 0) === attempt.swipeId && (!checkText || last.mes === attempt.text);
 }
 
 function latestReply(ctx = getContext()) {
@@ -127,13 +129,17 @@ function queue() {
         if (!installed || !settings().auto || !pending || running) return;
         const attempt = pending;
         const ctx = getContext();
-        if (!cycle || cycle.id !== attempt.cycleId || cycle.attempted || !matches(attempt, ctx)) {
+        if (!cycle || cycle.id !== attempt.cycleId || cycle.attempted || !matches(attempt, ctx, false)) {
             clearPending();
             setStatus('聊天或回复已变化，已取消本次自动重写');
             return;
         }
         if (!isIdle(ctx)) { setStatus('等待首轮生成和保存完成'); queue(); return; }
         if (composerBusy()) { setStatus('输入框有草稿或附件，暂缓自动重写'); queue(); return; }
+        // Capture the finalized text after receive/render handlers and MVU's
+        // extra-model parsing, rather than before their status/variable additions.
+        attempt.text = attempt.message.mes;
+        if (!attempt.text?.trim() || attempt.text.trim() === '...') { clearPending(); return; }
         cycle.attempted = true;
         clearPending();
         void rewrite(attempt);
@@ -145,8 +151,8 @@ function sameJob(job) {
 }
 
 function appendFeedback(ctx, text, job) {
-    // An ordinary user turn during this request. Do not rearrange history, inspect
-    // preset-specific tags, inject prompts, or change the original assistant turn.
+    // Keep the original assistant text as the draft being reviewed. MVU variables
+    // are temporarily rebased separately, without changing the saved draft text.
     const message = {
         name: ctx.name1,
         is_user: true,
@@ -184,8 +190,10 @@ async function rewrite(attempt, automatic = true) {
     running = job;
     setStatus('正在准备重写');
     try {
-        const { message, index } = appendFeedback(ctx, feedback, job);
+        prepareMvu(job);
+        const { message, index } = appendFeedback(ctx, feedback + (job.mvu ? mvuFeedback : ''), job);
         job.feedback = message;
+        resetMvuFeedback(job);
         markStaging(job);
         await ctx.saveChat();
         if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
@@ -193,18 +201,26 @@ async function rewrite(attempt, automatic = true) {
         if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
         await ctx.eventSource.emit(ctx.eventTypes.USER_MESSAGE_RENDERED, index);
         if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
+        resetMvuFeedback(job);
         if (composerBusy()) {
             throw new Error('输入框中出现了新草稿或附件，本次重写已停止');
         }
+        if (job.mvu) {
+            setStatus('等待 MVU 解析窗口');
+            await waitMvuWindow(mvuReadyAt, () => sameJob(job) && getContext().chat.at(-1) === message);
+            if (composerBusy()) throw new Error('输入框中出现了新草稿或附件，本次重写已停止');
+        }
         // Standard generation, exactly as replying to the newly added user turn.
         // This guard remains set through all native tool-call continuation requests.
-        job.route = routing.acquire({ ...settings() }, () => sameJob(job) && job.generating);
+        job.route = routing.acquire({ ...settings() }, () => sameJob(job) && job.generating && !mvuBusy());
         job.generating = true;
         setStatus(`${automatic ? '正在自动重写' : '正在重写'} · ${job.route.label}`);
         await getContext().generate('normal', { automatic_trigger: true });
         if (!sameJob(job)) throw new Error('重写已取消或聊天已变化');
         const last = getContext().chat.at(-1);
         if (!last || last === job.source || last.is_user || last.is_system || !last.mes?.trim() || last.mes.trim() === '...') throw new Error('未收到可用的重写正文');
+        if (job.mvu) setStatus('正在整理重写稿的 MVU 变量');
+        await finishMvu(job, last, () => sameJob(job) && getContext().chat.at(-1) === last);
         job.timing.finishedAt = Date.now();
         await collapse(job, last);
         setStatus('重写已完成，原稿已保存为上一版');
@@ -267,6 +283,9 @@ export function enable() {
     }
     subscribe(events.GENERATION_STARTED, (type, options, dryRun) => {
         if (dryRun) return;
+        // An MVU extra-model request belongs to the active turn, not a new
+        // user generation that should take over or invalidate the rewrite.
+        if (mvuBusy()) return;
         if (running) {
             // Another extension started a request while feedback events were firing.
             if (!running.generating || !options?.automatic_trigger) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); setStatus('已由其他生成流程接管'); }
@@ -290,7 +309,23 @@ export function enable() {
         pending = { cycleId: cycle.id, key: cycle.key, index: Number(id), message, text, swipeId: message.swipe_id ?? 0 };
         queue();
     });
-    subscribe(events.GENERATION_ENDED, () => { ui?.refresh(); queue(); });
+    subscribe(events.GENERATION_ENDED, () => {
+        if (!running) mvuReadyAt = Date.now() + 3100;
+        ui?.refresh(); queue();
+    });
+    subscribe(events.MESSAGE_EDITED, id => {
+        // Automatic finalization may accept MVU's programmatic text additions,
+        // but an explicit user edit still cancels the queued rewrite.
+        if (pending && Number(id) === pending.index) {
+            clearPending();
+            setStatus('回复已编辑，已取消本次自动重写');
+        }
+    });
+    subscribe(events.MESSAGE_SWIPED, async id => {
+        const ctx = getContext();
+        if (running || Number(id) !== ctx.chat.length - 1) return;
+        if (syncMvuChat(ctx.chat[Number(id)])) await ctx.saveChat();
+    });
     subscribe(events.GENERATION_STOPPED, () => {
         clearPending(); cycle = null;
         if (running) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); }
