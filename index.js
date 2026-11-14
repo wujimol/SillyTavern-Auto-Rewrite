@@ -326,7 +326,10 @@ export function enable() {
         if (running || Number(id) !== ctx.chat.length - 1) return;
         if (syncMvuChat(ctx.chat[Number(id)])) await ctx.saveChat();
     });
-    subscribe(events.GENERATION_STOPPED, () => {
+    subscribe(events.GENERATION_STOPPED, generationId => {
+        // Tavern Helper emits this shared event for its own requests, including
+        // MVU extra analysis. Only a native chat stop should cancel the rewrite.
+        if (mvuBusy() || (typeof generationId === 'string' && generationId)) return;
         clearPending(); cycle = null;
         if (running) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); }
         markStaging(running);

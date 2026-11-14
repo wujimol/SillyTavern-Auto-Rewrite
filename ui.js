@@ -462,6 +462,7 @@ export function createRewriteUI({ getSettings, getView, getRouting, onRoute, onR
         dialog.addEventListener('close', () => { menu.close(); abortForm(form); forms.delete(form); activeDialog.remove(); if (dialog === activeDialog) dialog = null; });
         document.body.append(dialog);
         sync();
+        refresh();
         dialog.showModal();
     };
     const makeBar = () => {
