@@ -2,7 +2,7 @@
     "display_name": "正文重写 · 独立版",
     "author": "wujimol",
     "version": "3.1.1",
-    "description": "正文底部手动或自动重写，按普通对话发出请求，完成后替换原楼，并可一键切换原稿与重写版。无需修改酒馆本体。",
+    "description": "正文底部手动或自动重写，通过酒馆原生 Swipe 在同一楼生成新候选，保留原稿，不新增或删除临时聊天楼层。",
     "homePage": "https://github.com/wujimol/SillyTavern-Auto-Rewrite",
     "loading_order": 220,
     "requires": [],

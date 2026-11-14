@@ -7,88 +7,25 @@ export const TEMP = 'auto_rewrite_temporary';
 const RECEIPT = 'st.auto-rewrite.pending:';
 export const keyOf = ctx => `${ctx.groupId ?? ''}|${ctx.characterId ?? ''}|${ctx.getCurrentChatId() ?? ''}`;
 
-function fingerprint(text) {
+export function fingerprint(text) {
     let value = 2166136261;
     for (let i = 0; i < text.length; i++) value = Math.imul(value ^ text.charCodeAt(i), 16777619);
     return `${text.length}:${value >>> 0}`;
 }
 
-export function remember(job) {
-    try { sessionStorage.setItem(RECEIPT + job.key, JSON.stringify({ id: job.id, index: job.index,
-        sourceSwipe: job.attempt.swipeId, sourceHash: fingerprint(job.attempt.text) })); } catch { /* Storage is optional. */ }
-}
-
-export function forget(job) {
+function forget(job) {
     try {
         const saved = JSON.parse(sessionStorage.getItem(RECEIPT + job.key) || 'null');
         if (saved?.id === job.id) sessionStorage.removeItem(RECEIPT + job.key);
     } catch { /* Storage is optional. */ }
 }
 
-export function ownsTail(job, ctx = getContext()) {
+function ownsTail(job, ctx = getContext()) {
     return keyOf(ctx) === job.key && ctx.chat[job.index] === job.source
         && job.source.mes === job.attempt.text && (job.source.swipe_id ?? 0) === job.attempt.swipeId
         && job.prefix.every((message, i) => ctx.chat[i] === message)
         && ctx.chat[job.index + 1] === job.feedback && job.feedback?.extra?.[TEMP]?.id === job.id
         && ctx.chat.slice(job.index + 2).every(message => !message.is_user);
-}
-
-export function liveReply(job) {
-    if (!job || job.cancelled || !ownsTail(job)) return null;
-    const ctx = getContext();
-    for (let index = ctx.chat.length - 1; index > job.index + 1; index--) {
-        const message = ctx.chat[index];
-        if (!message.is_user && !message.is_system && document.querySelector(`#chat > .mes[mesid="${index}"]`)) {
-            return { key: job.key, index, message, text: message.mes, swipeId: message.swipe_id ?? 0, preview: true };
-        }
-    }
-    return null;
-}
-
-function revealOriginal(source) {
-    source?.classList.remove('auto-rewrite-preview-covered');
-    source?.querySelectorAll('.auto-rewrite-preview-old').forEach(node => node.classList.remove('auto-rewrite-preview-old'));
-    source?.querySelectorAll('.auto-rewrite-preview-waiting').forEach(node => node.remove());
-}
-
-export function markStaging(job) {
-    if (!job || !ownsTail(job)) return;
-    const source = document.querySelector(`#chat > .mes[mesid="${job.index}"]`);
-    const preview = liveReply(job);
-    document.querySelectorAll('#chat > .mes').forEach(node => {
-        const index = Number(node.getAttribute('mesid'));
-        if (index > job.index) node.classList.toggle('auto-rewrite-staging', index !== preview?.index);
-    });
-    if (job.cancelled) { revealOriginal(source); return; }
-    if (preview) {
-        // Keep the actual native streaming message visible. No text copies,
-        // alternate formatter, or changes to the request/history are involved.
-        source?.classList.add('auto-rewrite-preview-covered');
-        return;
-    }
-    // Before core creates its streaming message, show a blank rewrite page
-    // instead of continuing to present the old draft as the current output.
-    source?.classList.remove('auto-rewrite-preview-covered');
-    const block = source?.querySelector('.mes_block');
-    if (!block) return;
-    for (const node of block.children) {
-        if (!node.matches('.ch_name, .auto-rewrite-actions, .auto-rewrite-footer, .auto-rewrite-preview-waiting')) node.classList.add('auto-rewrite-preview-old');
-    }
-    if (!block.querySelector('.auto-rewrite-preview-waiting')) {
-        const waiting = document.createElement('div');
-        waiting.className = 'auto-rewrite-preview-waiting';
-        waiting.setAttribute('role', 'status');
-        waiting.innerHTML = '<span class="auto-rewrite-preview-label">重写中 · 新版本</span><p>正在等待上游返回内容…</p>';
-        const footer = block.querySelector(':scope > .auto-rewrite-footer, :scope > .auto-rewrite-actions');
-        if (footer) footer.before(waiting); else block.append(waiting);
-    }
-}
-
-export function showStaging() {
-    document.querySelectorAll('.auto-rewrite-staging').forEach(node => node.classList.remove('auto-rewrite-staging'));
-    document.querySelectorAll('.auto-rewrite-preview-covered').forEach(node => node.classList.remove('auto-rewrite-preview-covered'));
-    document.querySelectorAll('.auto-rewrite-preview-old').forEach(node => node.classList.remove('auto-rewrite-preview-old'));
-    document.querySelectorAll('.auto-rewrite-preview-waiting').forEach(node => node.remove());
 }
 
 function captureAnchor(index, preserve = false) {
@@ -128,51 +65,7 @@ async function redraw(index, key, { preserve = false } = {}) {
     return pin;
 }
 
-function info(message) {
-    return { send_date: message.send_date, gen_started: message.gen_started, gen_finished: message.gen_finished,
-        extra: structuredClone(message.extra ?? {}) };
-}
-
-export async function collapse(job, result) {
-    const ctx = getContext();
-    if (!ownsTail(job, ctx)) throw new Error('聊天或原稿已变化，未覆盖新的聊天内容');
-    const original = structuredClone(job.original);
-    const sourceSwipe = job.attempt.swipeId;
-    if (!Array.isArray(original.swipes) || !original.swipes.length) original.swipes = [original.mes];
-    original.swipes[sourceSwipe] = job.attempt.text;
-    original.swipe_info = original.swipes.map((_, i) => structuredClone(original.swipe_info?.[i] ?? {}));
-    original.swipe_info[sourceSwipe] = info(original);
-    const final = { ...original, ...structuredClone(result), name: original.name, is_user: false, is_system: false };
-    final.extra = structuredClone(result.extra ?? {});
-    delete final.extra[TEMP];
-    const parent = original.extra?.[REVISION];
-    const inherited = parent?.originalHash ? original.swipes.findIndex(text => fingerprint(text) === parent.originalHash) : parent?.originalSwipe;
-    const originalSwipe = Number.isInteger(inherited) && inherited >= 0 && inherited < original.swipes.length ? inherited : sourceSwipe;
-    const rewrittenSwipe = original.swipes.length;
-    final.extra[REVISION] = { id: job.id, originalSwipe, originalHash: fingerprint(original.swipes[originalSwipe]), sourceSwipe, rewrittenSwipe,
-        automatic: job.automatic, timing: { ...job.timing } };
-    final.swipes = [...original.swipes, final.mes];
-    final.swipe_id = rewrittenSwipe;
-    final.swipe_info = [...original.swipe_info, info(final)];
-    ctx.chat.splice(job.index, ctx.chat.length - job.index, final);
-    job.settled = true;
-    await ctx.saveChat();
-    forget(job);
-    const pin = await redraw(job.index, job.key, { preserve: true });
-    if (keyOf(getContext()) !== job.key) return;
-    await ctx.eventSource.emit(ctx.eventTypes.MESSAGE_DELETED, ctx.chat.length);
-    if (keyOf(getContext()) !== job.key) return;
-    await ctx.eventSource.emit(ctx.eventTypes.MESSAGE_UPDATED, job.index);
-    if (keyOf(getContext()) !== job.key) return;
-    await ctx.eventSource.emit(ctx.eventTypes.CHARACTER_MESSAGE_RENDERED, job.index, 'swipe');
-    requestAnimationFrame(() => { if (keyOf(getContext()) === job.key) applyAnchor(pin); });
-    if (keyOf(getContext()) !== job.key || ctx.chat[job.index] !== final) return;
-    final.swipes[final.swipe_id] = final.mes;
-    final.swipe_info[final.swipe_id] = info(final);
-    await ctx.saveChat();
-}
-
-export async function restore(job) {
+async function restore(job) {
     if (!job.feedback) { forget(job); return true; }
     const ctx = getContext();
     if (!ownsTail(job, ctx)) return false;
@@ -188,7 +81,7 @@ export async function restore(job) {
     return true;
 }
 
-export async function recover() {
+export async function recoverLegacyRewrite() {
     const ctx = getContext();
     let saved;
     try { saved = JSON.parse(sessionStorage.getItem(RECEIPT + keyOf(ctx)) || 'null'); } catch { return false; }
@@ -204,6 +97,9 @@ export function versionLink(reply) {
     const message = reply?.message;
     if (!message || !Array.isArray(message.swipes)) return null;
     const current = message.swipe_id ?? 0;
+    // Native overswipe selects the new slot before the first streamed token
+    // creates its swipes entry. There is no version link during that window.
+    if (!Number.isInteger(current) || typeof message.swipes[current] !== 'string') return null;
     const record = message.extra?.[REVISION];
     const originalSwipe = record?.originalHash ? message.swipes.findIndex(text => fingerprint(text) === record.originalHash) : record?.originalSwipe;
     if (Number.isInteger(originalSwipe) && originalSwipe >= 0
@@ -226,7 +122,6 @@ export async function jumpVersion(reply, target) {
     await ctx.swipe.to(null, target < reply.swipeId ? SWIPE_DIRECTION.LEFT : SWIPE_DIRECTION.RIGHT,
         { source: SWIPE_SOURCE.SWIPE_PICKER, forceMesId: reply.index, forceSwipeId: target, forceDuration: 0 });
     if (keyOf(getContext()) === reply.key) {
-        await redraw(reply.index, reply.key);
         await ctx.saveChat();
     }
 }

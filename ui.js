@@ -220,7 +220,7 @@ function setDropdownButton(btn, items, value) {
     btn.dataset.value = value;
 }
 
-export function createRewriteUI({ getSettings, getView, getRouting, onRoute, onRefreshModels, onMainProfile, onMainModel, onRefreshMainModels, onAuto, onFeedback, onRewrite, onJump, onMutation }) {
+export function createRewriteUI({ getSettings, getView, getRouting, onRoute, onRefreshModels, onMainProfile, onMainModel, onRefreshMainModels, onAuto, onFeedback, onRewrite, onJump }) {
     let panel, bar, footer, nativePager, pagerSlot, dialog, observer, frame, poll, clock, shown;
     let dock, dockViewport, dockObserver, dockPadding;
     let disposed = false;
@@ -559,8 +559,7 @@ export function createRewriteUI({ getSettings, getView, getRouting, onRoute, onR
             if (node.textContent !== view.status) node.textContent = view.status;
         }
         if (view.busy) {
-            // Keep the same controls anchored to the viewport through temporary
-            // replies and tool continuations, rather than rebuilding each floor.
+            // Keep controls stable while the native swipe streams in the same floor.
             mountDock();
         } else {
             if (dock) releaseDock();
@@ -619,7 +618,7 @@ export function createRewriteUI({ getSettings, getView, getRouting, onRoute, onR
         }
         const chat = document.getElementById('chat');
         if (!observer && chat) {
-            observer = new MutationObserver(() => { onMutation(); refresh(); });
+            observer = new MutationObserver(() => { refresh(); });
             observer.observe(chat, { childList: true });
         }
         sync(); refresh();

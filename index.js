@@ -5,7 +5,8 @@ import { hasPendingFileAttachment } from '../../../chats.js';
 import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { createRewriteUI } from './ui.js';
 import { createModelRouting } from './model-routing.js';
-import { REVISION, TEMP, remember, collapse, restore, recover, markStaging, liveReply, showStaging, versionLink, jumpVersion } from './revisions.js';
+import { REVISION, recoverLegacyRewrite, versionLink, jumpVersion } from './revisions.js';
+import { claimNativeGeneration, clearNativePrompt, completeNativeSwipe, liveNativeReply, recoverNativeSwipe, restoreNativeSwipe, startNativeSwipe } from './native-swipe.js';
 
 const KEY = 'rewrite_writer';
 const RUNTIME = Symbol.for('st.auto-rewrite.standalone');
@@ -85,7 +86,7 @@ function latestReply(ctx = getContext()) {
 function view() {
     const ctx = getContext();
     const reply = running && chatKey(ctx) === running.key && ctx.chat[running.index] === running.source
-        ? liveReply(running) ?? { ...running.attempt, message: running.source, preview: !running.cancelled } : latestReply(ctx);
+        ? liveNativeReply(running) ?? { ...running.attempt, message: running.source, preview: !running.cancelled } : latestReply(ctx);
     const saved = reply?.message.extra?.[REVISION];
     return { reply, link: versionLink(reply), status, busy: Boolean(running), cancelled: Boolean(running?.cancelled),
         idle: isIdle(ctx), composerBusy: composerBusy(), timing: running?.timing ?? saved?.timing,
@@ -144,30 +145,6 @@ function sameJob(job) {
     return installed && running === job && !job.cancelled && chatKey() === job.key;
 }
 
-function appendFeedback(ctx, text, job) {
-    // An ordinary user turn during this request. Do not rearrange history, inspect
-    // preset-specific tags, inject prompts, or change the original assistant turn.
-    const message = {
-        name: ctx.name1,
-        is_user: true,
-        is_system: false,
-        send_date: new Date().toISOString(),
-        mes: ctx.substituteParams(getRegexedString(text, regex_placement.USER_INPUT)),
-        extra: { [TEMP]: { id: job.id, sourceIndex: job.index } },
-    };
-    if (!message.mes.trim()) throw new Error('修改意见被用户输入正则清空');
-    remember(job);
-    const avatar = core.user_avatar;
-    if (avatar && Object.hasOwn(ctx.powerUserSettings?.personas ?? {}, avatar)) {
-        message.force_avatar = ctx.getThumbnailUrl('persona', avatar);
-    }
-    const index = ctx.chat.length;
-    ctx.chat.push(message);
-    if (ctx.chatMetadata) ctx.chatMetadata.tainted = true;
-    ctx.addOneMessage(message, { scroll: false });
-    return { message, index };
-}
-
 async function rewrite(attempt, automatic = true) {
     if (running) return;
     const ctx = getContext();
@@ -178,40 +155,26 @@ async function rewrite(attempt, automatic = true) {
     const firstStarted = Date.parse(attempt.message.gen_started);
     const job = { id: `rewrite-${now.toString(36)}-${Math.random().toString(36).slice(2)}`,
         key: attempt.key, index: attempt.index, attempt, source: attempt.message,
-        original: structuredClone(attempt.message), prefix: ctx.chat.slice(0, attempt.index),
+        prefix: ctx.chat.slice(0, attempt.index),
         cancelled: false, generating: false, automatic,
         timing: { startedAt: automatic && Number.isFinite(firstStarted) ? Math.min(firstStarted, now) : now, rewriteStartedAt: now } };
     running = job;
     setStatus('正在准备重写');
     try {
-        const { message, index } = appendFeedback(ctx, feedback, job);
-        job.feedback = message;
-        markStaging(job);
-        await ctx.saveChat();
-        if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
-        await ctx.eventSource.emit(ctx.eventTypes.MESSAGE_SENT, index);
-        if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
-        await ctx.eventSource.emit(ctx.eventTypes.USER_MESSAGE_RENDERED, index);
-        if (!sameJob(job) || getContext().chat.at(-1) !== message) throw new Error('重写已取消或聊天已变化');
-        if (composerBusy()) {
-            throw new Error('输入框中出现了新草稿或附件，本次重写已停止');
-        }
-        // Standard generation, exactly as replying to the newly added user turn.
-        // This guard remains set through all native tool-call continuation requests.
         job.route = routing.acquire({ ...settings() }, () => sameJob(job) && job.generating);
         job.generating = true;
         setStatus(`${automatic ? '正在自动重写' : '正在重写'} · ${job.route.label}`);
-        await getContext().generate('normal', { automatic_trigger: true });
+        const preparedFeedback = ctx.substituteParams(getRegexedString(feedback, regex_placement.USER_INPUT));
+        if (!preparedFeedback.trim()) throw new Error('修改意见被用户输入正则清空');
+        await startNativeSwipe(job, preparedFeedback);
         if (!sameJob(job)) throw new Error('重写已取消或聊天已变化');
-        const last = getContext().chat.at(-1);
-        if (!last || last === job.source || last.is_user || last.is_system || !last.mes?.trim() || last.mes.trim() === '...') throw new Error('未收到可用的重写正文');
         job.timing.finishedAt = Date.now();
-        await collapse(job, last);
+        await completeNativeSwipe(job);
         setStatus('重写已完成，原稿已保存为上一版');
     } catch (error) {
         job.timing.finishedAt ??= Date.now();
         if (!job.settled) {
-            const restored = await restore(job).catch(cleanupError => { console.error('[Auto Rewrite] Cleanup', cleanupError); return false; });
+            const restored = await restoreNativeSwipe(job).catch(cleanupError => { console.error('[Auto Rewrite] Cleanup', cleanupError); return false; });
             if (installed && chatKey() === job.key) {
                 setStatus(restored ? job.cancelled ? '重写已取消，原稿已恢复' : '重写未完成，原稿已保留' : '聊天已变化，保留记录供检查，未覆盖新内容');
                 if (!job.cancelled) globalThis.toastr?.warning(`${status}：${error.message}`);
@@ -223,7 +186,7 @@ async function rewrite(attempt, automatic = true) {
         if (!job.cancelled) console.error('[Auto Rewrite]', error);
     } finally {
         job.route?.release();
-        showStaging();
+        clearNativePrompt(job);
         if (running === job) running = null;
         ui?.sync();
         ui?.refresh();
@@ -232,7 +195,9 @@ async function rewrite(attempt, automatic = true) {
 
 async function recoverInterrupted() {
     if (!installed || running || !isIdle()) return;
-    try { if (await recover()) setStatus('已清理中断的重写，原稿已恢复'); }
+    try {
+        if (await recoverNativeSwipe() || await recoverLegacyRewrite()) setStatus('已恢复中断重写的原稿版本');
+    }
     catch (error) { console.error('[Auto Rewrite] Recovery', error); }
     ui?.refresh();
 }
@@ -250,7 +215,6 @@ export function enable() {
         onMainProfile: id => { routing.setMainProfile(id); ui?.sync(); ui?.refresh(); },
         onMainModel: model => { routing.setMainModel(model); ui?.sync(); ui?.refresh(); },
         onRefreshMainModels: signal => routing.refreshModels({ profileId: '', model: '' }, signal),
-        onMutation: () => markStaging(running),
         onAuto: value => {
             settings().auto = value; getContext().saveSettingsDebounced();
             if (!value) clearPending();
@@ -268,8 +232,11 @@ export function enable() {
     subscribe(events.GENERATION_STARTED, (type, options, dryRun) => {
         if (dryRun) return;
         if (running) {
-            // Another extension started a request while feedback events were firing.
-            if (!running.generating || !options?.automatic_trigger) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); setStatus('已由其他生成流程接管'); }
+            if (!claimNativeGeneration(running, type, options, dryRun)) {
+                running.cancelled = true; running.timing.finishedAt ??= Date.now();
+                clearNativePrompt(running); running.route?.release();
+                setStatus('已由其他生成流程接管');
+            }
             return;
         }
         clearPending();
@@ -278,7 +245,9 @@ export function enable() {
         ui?.refresh();
     });
     subscribe(events.MESSAGE_RECEIVED, (id, type) => {
-        markStaging(running); ui?.refresh();
+        if (running && running.nativeStarted && Number(id) === running.index
+            && getContext().chat[running.index] === running.source && type === 'swipe') running.received = true;
+        ui?.refresh();
         if (running || !settings().auto || !cycle?.eligible || cycle.attempted || type === 'first_message') return;
         const ctx = getContext();
         const stream = ctx.streamingProcessor;
@@ -290,17 +259,23 @@ export function enable() {
         pending = { cycleId: cycle.id, key: cycle.key, index: Number(id), message, text, swipeId: message.swipe_id ?? 0 };
         queue();
     });
+    subscribe(events.TOOL_CALLS_PERFORMED, () => {
+        if (running?.nativeStarted && !running.cancelled) running.toolContinuation = true;
+    });
     subscribe(events.GENERATION_ENDED, () => { ui?.refresh(); queue(); });
     subscribe(events.GENERATION_STOPPED, () => {
         clearPending(); cycle = null;
         if (running) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); }
-        markStaging(running);
+        clearNativePrompt(running);
         setStatus(running ? '已取消，正在恢复原稿' : '已停止生成');
     });
     for (const type of [events.CHAT_CHANGED, events.MAIN_API_CHANGED, events.OAI_PRESET_CHANGED_BEFORE,
         events.CONNECTION_PROFILE_LOADED]) subscribe(type, () => {
         clearPending(); cycle = null;
-        if (running) { running.cancelled = true; running.timing.finishedAt ??= Date.now(); }
+        if (running) {
+            running.cancelled = true; running.timing.finishedAt ??= Date.now();
+            clearNativePrompt(running); running.route?.release();
+        }
         setStatus('上下文已切换，等待下一次生成');
         ui?.sync();
         void recoverInterrupted();
@@ -308,9 +283,10 @@ export function enable() {
     subscribe(events.CHAT_LOADED, () => { ui?.install(); void recoverInterrupted(); });
     for (const type of [events.MESSAGE_SWIPED, events.MESSAGE_UPDATED, events.MESSAGE_DELETED,
         events.CHARACTER_MESSAGE_RENDERED, events.MORE_MESSAGES_LOADED]) subscribe(type, () => ui?.refresh());
-    subscribe(events.MESSAGE_SENT, id => {
-        if (running && getContext().chat[Number(id)] !== running.feedback) {
-            running.cancelled = true; running.timing.finishedAt ??= Date.now(); showStaging();
+    subscribe(events.MESSAGE_SENT, () => {
+        if (running) {
+            running.cancelled = true; running.timing.finishedAt ??= Date.now();
+            clearNativePrompt(running); running.route?.release();
         }
     });
     $(document).on('input.autoRewriteComposer change.autoRewriteComposer', '#send_textarea, #file_form_input', () => ui?.refresh());
@@ -323,13 +299,13 @@ export function disable() {
     const job = running;
     if (job) {
         job.cancelled = true;
+        clearNativePrompt(job); job.route?.release();
         if (job.generating) getContext().stopGeneration();
     }
     const ctx = getContext();
     for (const [type, handler] of subscriptions.splice(0)) ctx.eventSource.removeListener(type, handler);
     $(document).off('.autoRewriteComposer');
     ui?.dispose(); ui = null;
-    showStaging();
 }
 
 jQuery(enable);
