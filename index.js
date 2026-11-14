@@ -9,12 +9,11 @@ import { REVISION, TEMP, remember, collapse, restore, recover, markStaging, live
 
 const KEY = 'rewrite_writer';
 const RUNTIME = Symbol.for('st.auto-rewrite.standalone');
-const DEFAULT_FEEDBACK = `上一轮正文问题很多：讲故事水平太差, 角色刻画不到位, 太过刻意俗套尬不自然，台词又尬又怪，逻辑不通，剧情和文风也有毛病。需要重写
-写本轮正文前，先用<pre>...</pre>做一次预分析，挑出上一轮的问题。</pre>后空一行，再写<content>。
+const DEFAULT_FEEDBACK = `上一轮正文剧情写的太烂了，角色们（不局限于{{user}}）的言行举止刻画的很烂，角色们的心理刻画很烂毫无深度可言，又肤浅又烂，台词很烂。那些优秀的网文角色塑造，哪个不是吊打你这破内容。剧情很烂。文风很烂。烂完了!  重写！
 
-1. 角色刻画与心理, 行为逻辑有哪些问题（约1000字）
-2. 台词（约500字）: 哪些台词尬,怪,不合理,逻辑有问题
-3. 其他问题, 800字
+写本轮正文前，先用<prex>...</prex>做一次预分析，挑出上一轮的问题。</prex>后空一行，再写<content>。
+
+分析不少于2000字
 
 每部分最后用一两句写出"本轮改法"。正文要照着这些改法写，不能分析完了照旧。`;
 let installed = false;
