@@ -675,7 +675,9 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         const phase = networkPhase === '请求已发出，等待上游响应' ? '等待模型响应' : networkPhase;
         const caption = view.busy
             ? phase ? `重写 · ${phase}` : view.receiving ? '正在重写' : view.status
-            : view.blocker || (view.link?.original ? '原稿' : view.stopped ? '已停止，重写稿已保留' : view.link ? '重写稿' : '');
+            // 输入框有草稿时按钮会禁用；原因只写在 title 里，触屏设备看不到，所以也显示在状态文字中。
+            : view.blocker || (view.composerBusy ? '输入框有草稿，发送或清空后可重写'
+                : view.link?.original ? '原稿' : view.stopped ? '已停止，重写稿已保留' : view.link ? '重写稿' : '');
         const meta = bar.querySelector('.auto-rewrite-meta');
         meta.hidden = !caption;
         const indicator = meta.querySelector('.auto-rewrite-indicator');
