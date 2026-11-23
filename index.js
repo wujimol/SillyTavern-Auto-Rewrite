@@ -176,7 +176,15 @@ async function openVersions() {
             // 部分酒馆（如 TauriTavern）的 swipe-picker 未导出只读版本记录接口，
             // 退回该楼的原生版本计数器，由酒馆自己的版本选择器展示。
             const counter = document.querySelector('#chat > .mes[mesid="' + job.index + '"] .swipes-counter.swipe-picker-enabled');
-            if (counter) { counter.click(); return; }
+            if (counter) {
+                // 触屏环境绑定的是长按（touchstart 后 500ms），桌面绑定的是 click。
+                if (window.matchMedia?.('(pointer: coarse)')?.matches || window.innerWidth < 1000) {
+                    counter.dispatchEvent(new Event('touchstart', { bubbles: true, cancelable: true }));
+                } else {
+                    counter.click();
+                }
+                return;
+            }
             globalThis.toastr?.info('当前酒馆版本未提供生成期间的原生版本记录。');
             return;
         }
