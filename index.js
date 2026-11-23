@@ -105,8 +105,8 @@ function composerBusy() {
 function rewriteBlocker(ctx = getContext()) {
     if (core.isChatSaving) return '正在保存聊天';
     const stream = ctx.streamingProcessor;
-    if (stream?.isFinished || stream?.isFinalizing || stream?.isStopped) return '正在完成回复收尾';
-    if (core.is_send_press || stream) return '正在生成回复';
+    if (core.is_send_press && (stream?.isFinished || stream?.isFinalizing || stream?.isStopped)) return '正在完成回复收尾';
+    if (core.is_send_press) return '正在生成回复';
     if (core.swipeState === SWIPE_STATE.SWIPING) return '正在切换回复版本';
     if (core.swipeState === SWIPE_STATE.EDITING
         || document.querySelector('#chat :is(.edit_textarea, .reasoning_edit_textarea, .mes_edit_textarea)')) return '正在编辑消息';
@@ -173,6 +173,10 @@ async function openVersions() {
     try {
         const { openReadOnlySwipePicker } = await import('../../../swipe-picker.js');
         if (typeof openReadOnlySwipePicker !== 'function') {
+            // 部分酒馆（如 TauriTavern）的 swipe-picker 未导出只读版本记录接口，
+            // 退回该楼的原生版本计数器，由酒馆自己的版本选择器展示。
+            const counter = document.querySelector('#chat > .mes[mesid="' + job.index + '"] .swipes-counter.swipe-picker-enabled');
+            if (counter) { counter.click(); return; }
             globalThis.toastr?.info('当前酒馆版本未提供生成期间的原生版本记录。');
             return;
         }
@@ -527,7 +531,7 @@ export function enable() {
         if (running || !settings().auto || !cycle?.eligible || cycle.attempted || type === 'first_message') return;
         const ctx = getContext();
         const stream = ctx.streamingProcessor;
-        if (stream?.isStopped || stream?.abortController?.signal.aborted) return;
+        if (core.is_send_press && (stream?.isStopped || stream?.abortController?.signal.aborted)) return;
         const message = ctx.chat.at(-1);
         const text = message?.mes;
         if (chatKey(ctx) !== cycle.key || Number(id) !== ctx.chat.length - 1 || !message
