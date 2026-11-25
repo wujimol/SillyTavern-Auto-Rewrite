@@ -5,6 +5,8 @@ import { backgroundDelay } from './background-scheduler.js';
 // Keep only its own fields in the transaction so other scripts retain their data.
 const FIELDS = ['initialized_lorebooks', 'stat_data', 'schema', 'display_data', 'delta_data'];
 const TRANSACTION = 'auto_rewrite_mvu';
+// 重写稿重新计算变量时追加的约定。关闭「重写时更新变量」后插件完全不追加任何文字：
+// 变量更新块出不出、怎么写，由用户自己的预设和世界书决定，本插件不代为要求也不代为禁止。
 export const mvuFeedback = '\n\n【MVU 重写约定】本次是替换上一版正文，不是推进下一轮剧情。上一版的变量更新作废；当前提供的变量是本轮开始前的状态。请仍按原预设与角色卡格式要求在末尾保留变量更新块（如 <UpdateVariable> / <JSONPatch> 等），不要将其当作“正文之外的内容”省略；计算变量更新时只基于本轮开始前的状态，不要累加上一版的变化。';
 
 export function mvuBusy() {
@@ -55,7 +57,7 @@ function slot(message, swipe = message.swipe_id ?? 0) {
     return message.variables[swipe] ??= {};
 }
 
-export function prepareMvu(job) {
+export function prepareMvu(job, { updateVariables = true } = {}) {
     const ctx = getContext();
     const current = activeData(job.source);
     const active = Boolean(globalThis.Mvu);
@@ -71,12 +73,16 @@ export function prepareMvu(job) {
         // Legacy MVU data exists in chat history, but MVU itself is not loaded.
         // Preserve the existing snapshot on the rewritten swipe without blocking.
         baseline ??= pick(current);
-    } else {
+    } else if (updateVariables) {
         if (!baseline) throw new Error('找不到本轮开始前的 MVU 变量快照，已保留原稿；请先用 MVU 恢复历史楼层变量');
         if (!isMvuData(current)) throw new Error('本轮 MVU 变量尚未写入，请等变量更新完成后再重写');
+    } else {
+        // 不重算变量时不需要本轮开始前的快照，沿用上一版结果即可。
+        baseline ??= pick(current);
     }
     const transaction = {
-        id: job.id, swipe: job.attempt.swipeId, active, original: pick(current), baseline,
+        id: job.id, swipe: job.attempt.swipeId, active, updateVariables,
+        original: pick(current), baseline,
         chat: pick(ctx.chatMetadata?.variables),
         mirrorChat: isMvuData(ctx.chatMetadata?.variables),
     };
@@ -85,6 +91,8 @@ export function prepareMvu(job) {
     // It survives reloads, unlike the in-memory job or sessionStorage receipt alone.
     job.source.extra ??= {};
     job.source.extra[TRANSACTION] = transaction;
+    // 不重算变量时不回拨：重写稿直接沿用上一版的变量结果。
+    if (!updateVariables) return;
     replaceFields(slot(job.source), baseline);
     if (transaction.mirrorChat) replaceFields(ctx.chatMetadata.variables, baseline);
 }
@@ -92,13 +100,17 @@ export function prepareMvu(job) {
 export function resetMvuFeedback(job) {
     if (!job.mvu) return;
     // MESSAGE_SENT runs MVU and other listeners. Discard any variable commands in
-    // the temporary feedback and give prompt macros/extra-model parsing the baseline.
-    replaceFields(slot(job.feedback), job.mvu.baseline);
-    if (job.mvu.mirrorChat) replaceFields(getContext().chatMetadata.variables, job.mvu.baseline);
+    // the temporary feedback and give prompt macros/extra-model parsing the state
+    // this rewrite is anchored to: the turn baseline, or the previous version's
+    // result when variable updates are switched off.
+    const state = job.mvu.updateVariables === false ? job.mvu.original : job.mvu.baseline;
+    replaceFields(slot(job.feedback), state);
+    if (job.mvu.mirrorChat) replaceFields(getContext().chatMetadata.variables, state);
 }
 
 export async function finishMvu(job, result, isCurrent) {
     if (!job.mvu) return;
+    if (job.mvu.updateVariables === false) return finishMvuKeepVariables(job, result, isCurrent);
     const preserveStopped = () => {
         if (!job.stopRequested) return false;
         if (!isCurrent()) throw new Error('聊天已变化，未覆盖新的内容');
@@ -145,6 +157,18 @@ export async function finishMvu(job, result, isCurrent) {
         job.mvuPending = true;
         replaceFields(slot(result), job.mvu.baseline);
     }
+}
+
+// 关闭「重写时更新变量」：重写稿只替换正文，变量沿用被替换那一版的结果。
+// 这里既不解析更新块，也不因为没收到快照而把变量退回本轮开始前。
+async function finishMvuKeepVariables(job, result, isCurrent) {
+    while (mvuBusy()) {
+        if (!isCurrent()) throw new Error('重写已取消或聊天已变化');
+        await backgroundDelay(100);
+    }
+    if (!isCurrent()) throw new Error('重写已取消或聊天已变化');
+    replaceFields(slot(result), job.mvu.original);
+    job.mvuPending = false;
 }
 
 export function restoreMvu(job, { restoreChat = true } = {}) {
