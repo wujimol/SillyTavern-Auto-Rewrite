@@ -317,13 +317,16 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         const startActiveDrag = event => {
             drag.active = true;
             const rect = drag.row.getBoundingClientRect();
+            const shellRect = shell.getBoundingClientRect();
+            drag.baseLeft = shellRect.left + shell.clientLeft;
+            drag.baseTop = shellRect.top + shell.clientTop;
             drag.offsetY = event.clientY - rect.top;
             const ghost = drag.row.cloneNode(true);
             ghost.classList.remove('is-drop-before', 'is-drop-after');
             ghost.classList.add('auto-rewrite-drag-ghost');
             ghost.style.width = `${rect.width}px`;
-            ghost.style.left = `${rect.left}px`;
-            ghost.style.top = `${rect.top}px`;
+            ghost.style.left = `${rect.left - drag.baseLeft}px`;
+            ghost.style.top = `${rect.top - drag.baseTop}px`;
             shell.append(ghost);
             drag.ghost = ghost;
             drag.row.classList.add('is-dragging');
@@ -340,7 +343,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 startActiveDrag(event);
             }
             event.preventDefault();
-            if (drag.ghost) drag.ghost.style.top = `${event.clientY - drag.offsetY}px`;
+            if (drag.ghost) drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
             updateDropTarget(event.clientY);
         };
 

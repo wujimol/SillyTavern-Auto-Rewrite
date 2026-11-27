@@ -1301,15 +1301,17 @@ button.auto-rewrite-select-btn:not(:disabled):active { transform: scale(.985); }
 .auto-rewrite-library-row.is-drop-after::after { bottom: -4px; }
 
 .auto-rewrite-drag-ghost {
-    position: fixed !important;
+    position: absolute !important;
     z-index: 9999;
     margin: 0 !important;
     pointer-events: none !important;
     border-color: var(--ar-accent) !important;
-    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #252337) 92%, var(--ar-accent) 12%) !important;
-    box-shadow: 0 12px 30px rgba(0, 0, 0, .42), 0 0 0 1px var(--ar-accent-line) !important;
-    opacity: .95;
-    transform: scale(1.015) !important;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #252337) 96%, var(--ar-accent) 14%) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .46), 0 0 0 1px var(--ar-accent-line) !important;
+    opacity: .98;
+    transform: none !important;
 }
 .auto-rewrite-drag-ghost::before,
 .auto-rewrite-drag-ghost::after { display: none !important; }
