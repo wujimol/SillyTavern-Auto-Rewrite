@@ -1378,6 +1378,7 @@ button.auto-rewrite-select-btn:not(:disabled):active { transform: scale(.985); }
     max-height: 62vh;
     resize: vertical;
     overflow-y: auto;
+    overflow-anchor: none;
     overscroll-behavior: contain;
     scrollbar-width: thin;
     padding: 16px 20px;

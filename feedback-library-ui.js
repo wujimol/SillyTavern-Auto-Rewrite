@@ -215,8 +215,20 @@ const joinMarkdownBlocks = blocks => blocks.map(block => `${block.raw}${block.se
 
 function autoSizeTextarea(textarea) {
     if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.max(30, textarea.scrollHeight)}px`;
+    const block = textarea.parentElement;
+    const surface = textarea.closest('.ar-live-surface');
+    const wrap = textarea.closest('.auto-rewrite-library-editor-wrap');
+    const surfaceScroll = surface ? surface.scrollTop : 0;
+    const wrapScroll = wrap ? wrap.scrollTop : 0;
+    const prevBlockHeight = block ? block.offsetHeight : 0;
+    // Pin parent block min-height during measurement so the scroll container never collapses & clamps scrollTop.
+    if (block && prevBlockHeight > 0) block.style.minHeight = `${prevBlockHeight}px`;
+    textarea.style.height = '0px';
+    const nextHeight = Math.max(36, textarea.scrollHeight);
+    textarea.style.height = `${nextHeight}px`;
+    if (block) block.style.minHeight = '';
+    if (surface) surface.scrollTop = surfaceScroll;
+    if (wrap) wrap.scrollTop = wrapScroll;
 }
 
 /** Measure exact pixel Y offset of a character index inside a visible <textarea>. */
