@@ -293,7 +293,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         }
     }
 
-    function renderBlockEditor(forceRebuild = false) {
+    function renderBlockEditor({ resplit = false, force = false } = {}) {
         if (!dialog) return;
         const entry = current();
         const surface = dialog.querySelector('[data-md-surface]');
@@ -316,8 +316,12 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         }
 
         const key = `${entry?.id ?? ''}\u0000${text}`;
-        if (!forceRebuild && key === renderedDocKey && editingBlockIndex < 0) return;
-        if (forceRebuild || key !== renderedDocKey) {
+        // Never rebuild DOM while typing inside an active block textarea unless explicitly requested.
+        if (!resplit && !force) {
+            if (key === renderedDocKey) return;
+            if (editingBlockIndex >= 0 && surface.contains(document.activeElement)) return;
+        }
+        if (resplit || (!force && key !== renderedDocKey)) {
             blocks = splitMarkdownBlocks(text);
             renderedDocKey = key;
         }
@@ -364,7 +368,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                         blocks.splice(index, 1);
                         editingBlockIndex = index - 1;
                         commitBlocksToEntry();
-                        renderBlockEditor(false);
+                        renderBlockEditor({ force: true });
                         focusActiveBlock(prevLen);
                     }
                 });
@@ -375,7 +379,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                         if (document.activeElement && dialog.querySelector('.ar-live-textarea') === document.activeElement) return;
                         editingBlockIndex = -1;
                         // Re-split in case user typed blank lines / pasted multiple blocks.
-                        renderBlockEditor(true);
+                        renderBlockEditor({ resplit: true });
                     }, 120);
                 });
                 item.append(ta);
@@ -425,17 +429,17 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
 
     function openBlockForEdit(index, caret = 'end') {
         if (!dialog || sourceMode) return;
-        // Re-split current text first if switching from another edited block that may have gained blank lines.
         const entry = current();
         if (entry && editingBlockIndex >= 0 && editingBlockIndex !== index) {
             const rawJoined = joinMarkdownBlocks(blocks);
             if (rawJoined !== entry.content) {
                 entry.content = rawJoined;
+                renderedDocKey = `${entry.id}\u0000${entry.content}`;
                 persist();
             }
         }
         editingBlockIndex = Math.max(0, Math.min(index, blocks.length - 1));
-        renderBlockEditor(false);
+        renderBlockEditor({ force: true });
         focusActiveBlock(caret);
     }
 
@@ -811,7 +815,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 sourceMode = true;
                 editingBlockIndex = -1;
                 renderedDocKey = '';
-                renderBlockEditor(true);
+                renderBlockEditor({ resplit: true });
 
                 const clamped = Math.max(0, Math.min(charOffset, sourceBox.value.length));
                 const targetY = measureTextareaOffsetY(sourceBox, clamped);
@@ -831,7 +835,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 sourceMode = false;
                 editingBlockIndex = -1;
                 renderedDocKey = '';
-                renderBlockEditor(true);
+                renderBlockEditor({ resplit: true });
 
                 // Find the rendered block containing anchorChar and align it to the same viewport offset.
                 let acc = 0;
@@ -901,7 +905,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             if (editingBlockIndex >= 0) {
                 event.preventDefault();
                 editingBlockIndex = -1;
-                renderBlockEditor(true);
+                renderBlockEditor({ resplit: true });
             }
         });
         shell.addEventListener('close', () => { cleanupDrag(); menu.close(); shell.remove(); if (dialog === shell) dialog = null; });
@@ -993,7 +997,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 const field = dialog.querySelector(`[data-${key}]`);
                 if (document.activeElement !== field) field.value = entry[key];
             }
-            renderBlockEditor(false);
+            renderBlockEditor();
             dialog.querySelector('[data-enabled]').checked = entry.enabled;
             dialog.querySelector('[data-scope-label]').textContent = entry.always ? '常驻' : '绑定预设 / 角色';
             for (const node of dialog.querySelectorAll('[data-scope]')) node.setAttribute('aria-pressed', String((node.dataset.scope === 'always') === entry.always));
