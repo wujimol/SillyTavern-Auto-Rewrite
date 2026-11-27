@@ -219,6 +219,51 @@ function autoSizeTextarea(textarea) {
     textarea.style.height = `${Math.max(30, textarea.scrollHeight)}px`;
 }
 
+/** Measure exact pixel Y offset of a character index inside a visible <textarea>. */
+function measureTextareaOffsetY(textarea, charIndex) {
+    const cs = getComputedStyle(textarea);
+    const mirror = document.createElement('div');
+    mirror.style.position = 'fixed';
+    mirror.style.left = '-99999px';
+    mirror.style.top = '0';
+    mirror.style.visibility = 'hidden';
+    mirror.style.pointerEvents = 'none';
+    mirror.style.boxSizing = 'border-box';
+    mirror.style.width = `${textarea.clientWidth}px`;
+    mirror.style.padding = cs.padding;
+    mirror.style.font = cs.font;
+    mirror.style.letterSpacing = cs.letterSpacing;
+    mirror.style.lineHeight = cs.lineHeight;
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.wordWrap = 'break-word';
+    mirror.style.overflowWrap = 'break-word';
+    const before = textarea.value.slice(0, Math.max(0, charIndex));
+    mirror.textContent = before;
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    mirror.append(marker);
+    document.body.append(mirror);
+    const padTop = parseFloat(cs.paddingTop) || 0;
+    const y = Math.max(0, marker.offsetTop - padTop);
+    mirror.remove();
+    return y;
+}
+
+/** Estimate the character offset at a given scrollTop inside a visible <textarea>. */
+function charIndexAtTextareaScrollTop(textarea) {
+    const text = textarea.value || '';
+    if (!text) return 0;
+    const targetY = textarea.scrollTop;
+    if (targetY <= 2) return 0;
+    let lo = 0, hi = text.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (measureTextareaOffsetY(textarea, mid) < targetY) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
 export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onOpen }) {
     const summaries = new Set();
     const menu = createMenu();
@@ -718,11 +763,99 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         button('[data-delete]', remove); button('[data-undo]', undo); button('[data-export]', exportLibrary);
         button('[data-import]', () => shell.querySelector('[data-file]').click());
         button('[data-source-toggle]', () => {
-            sourceMode = !sourceMode;
-            editingBlockIndex = -1;
-            renderedDocKey = '';
-            renderBlockEditor(true);
-            if (sourceMode) shell.querySelector('[data-content]')?.focus();
+            const surface = shell.querySelector('[data-md-surface]');
+            const sourceBox = shell.querySelector('[data-content]');
+            const entry = current();
+            if (!surface || !sourceBox || !entry) return;
+
+            if (!sourceMode) {
+                // Capture exact character position & viewport offset from MD surface before hiding it.
+                let charOffset = 0;
+                let viewportOffset = 0;
+                const activeIndex = editingBlockIndex;
+                const activeTa = activeIndex >= 0 ? surface.querySelector('.ar-live-textarea') : null;
+                const blockStarts = [];
+                let acc = 0;
+                for (const b of blocks) {
+                    blockStarts.push(acc);
+                    acc += b.raw.length + b.sep.length;
+                }
+                if (activeIndex >= 0 && activeIndex < blocks.length) {
+                    const caretInBlock = activeTa ? activeTa.selectionStart : 0;
+                    charOffset = (blockStarts[activeIndex] ?? 0) + caretInBlock;
+                    const activeEl = surface.querySelector(`.ar-live-block[data-block-index="${activeIndex}"]`);
+                    if (activeEl) {
+                        const relY = activeEl.getBoundingClientRect().top - surface.getBoundingClientRect().top;
+                        if (relY >= 0 && relY < surface.clientHeight - 24) viewportOffset = relY;
+                    }
+                } else {
+                    const surfaceRect = surface.getBoundingClientRect();
+                    const blockNodes = [...surface.querySelectorAll('.ar-live-block[data-block-index]')];
+                    let anchorIdx = 0;
+                    let ratio = 0;
+                    for (const node of blockNodes) {
+                        const rect = node.getBoundingClientRect();
+                        if (rect.bottom > surfaceRect.top + 6) {
+                            anchorIdx = Number(node.dataset.blockIndex) || 0;
+                            if (rect.top < surfaceRect.top && rect.height > 0) {
+                                ratio = Math.min(1, Math.max(0, (surfaceRect.top - rect.top) / rect.height));
+                            }
+                            break;
+                        }
+                    }
+                    const blockLen = blocks[anchorIdx]?.raw.length ?? 0;
+                    charOffset = (blockStarts[anchorIdx] ?? 0) + Math.round(blockLen * ratio);
+                }
+
+                if (surface.style.height) sourceBox.style.height = surface.style.height;
+                sourceMode = true;
+                editingBlockIndex = -1;
+                renderedDocKey = '';
+                renderBlockEditor(true);
+
+                const clamped = Math.max(0, Math.min(charOffset, sourceBox.value.length));
+                const targetY = measureTextareaOffsetY(sourceBox, clamped);
+                sourceBox.focus({ preventScroll: true });
+                sourceBox.setSelectionRange(clamped, clamped);
+                sourceBox.scrollTop = Math.max(0, targetY - viewportOffset);
+            } else {
+                // Capture exact character position at top of source textarea (or visible caret) before switching back to MD.
+                const topChar = charIndexAtTextareaScrollTop(sourceBox);
+                const caretChar = sourceBox.selectionStart ?? topChar;
+                const caretY = measureTextareaOffsetY(sourceBox, caretChar);
+                const caretVisible = caretY >= sourceBox.scrollTop - 8 && caretY <= sourceBox.scrollTop + sourceBox.clientHeight - 12;
+                const anchorChar = caretVisible ? caretChar : topChar;
+                const viewportOffset = caretVisible ? Math.max(0, caretY - sourceBox.scrollTop) : 0;
+
+                if (sourceBox.style.height) surface.style.height = sourceBox.style.height;
+                sourceMode = false;
+                editingBlockIndex = -1;
+                renderedDocKey = '';
+                renderBlockEditor(true);
+
+                // Find the rendered block containing anchorChar and align it to the same viewport offset.
+                let acc = 0;
+                let targetIdx = Math.max(0, blocks.length - 1);
+                let inBlockRatio = 0;
+                for (let i = 0; i < blocks.length; i++) {
+                    const span = blocks[i].raw.length + blocks[i].sep.length;
+                    if (anchorChar <= acc + span || i === blocks.length - 1) {
+                        targetIdx = i;
+                        inBlockRatio = blocks[i].raw.length > 0
+                            ? Math.min(1, Math.max(0, (anchorChar - acc) / blocks[i].raw.length))
+                            : 0;
+                        break;
+                    }
+                    acc += span;
+                }
+                const targetEl = surface.querySelector(`.ar-live-block[data-block-index="${targetIdx}"]`);
+                if (targetEl) {
+                    const targetRect = targetEl.getBoundingClientRect();
+                    const surfaceRect = surface.getBoundingClientRect();
+                    const targetTop = (targetRect.top - surfaceRect.top) + surface.scrollTop + targetRect.height * inBlockRatio;
+                    surface.scrollTop = Math.max(0, targetTop - viewportOffset);
+                }
+            }
         });
         shell.querySelector('[data-file]').addEventListener('change', event => { void importLibrary(event.target.files?.[0]); event.target.value = ''; });
         button('[data-up]', () => { if (current()) { moveEntry(getSettings(), selected, -1); persist(); } });
