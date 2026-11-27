@@ -472,33 +472,213 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     const current = () => entries().find(entry => entry.id === selected);
     const persist = () => { onChange(); sync(); };
 
+    /** Reusable pointer-based vertical drag reordering (desktop & touch, container-relative ghost). */
+    function bindDragReorder({ list, container, rowSelector, handleSelector, ignoreSelector, onReorder }) {
+        let drag = null;
+        let suppressClickUntil = 0;
+
+        const clearIndicators = () => {
+            for (const row of list.querySelectorAll(rowSelector)) {
+                row.classList.remove('is-drop-before', 'is-drop-after');
+            }
+        };
+
+        const cleanupDrag = () => {
+            if (!drag) return;
+            if (drag.scrollFrame) cancelAnimationFrame(drag.scrollFrame);
+            drag.row?.classList.remove('is-dragging');
+            drag.ghost?.remove();
+            list.classList.remove('is-reordering');
+            clearIndicators();
+            window.removeEventListener('pointermove', onPointerMove, true);
+            window.removeEventListener('pointerup', onPointerUp, true);
+            window.removeEventListener('pointercancel', onPointerCancel, true);
+            drag = null;
+        };
+
+        const updateDropTarget = clientY => {
+            clearIndicators();
+            const rows = [...list.querySelectorAll(rowSelector)]
+                .filter(row => row.dataset.entryId && row.dataset.entryId !== drag.entryId);
+            if (!rows.length) { drag.targetId = null; drag.position = null; return; }
+            let targetRow = rows[rows.length - 1];
+            let position = 'after';
+            for (const row of rows) {
+                const rect = row.getBoundingClientRect();
+                const mid = rect.top + rect.height / 2;
+                if (clientY < mid) {
+                    targetRow = row;
+                    position = 'before';
+                    break;
+                }
+            }
+            drag.targetId = targetRow.dataset.entryId;
+            drag.position = position;
+            targetRow.classList.add(position === 'before' ? 'is-drop-before' : 'is-drop-after');
+        };
+
+        const tickAutoScroll = () => {
+            if (!drag?.active) return;
+            const rect = list.getBoundingClientRect();
+            const edge = 32;
+            let delta = 0;
+            if (drag.lastY < rect.top + edge) delta = -Math.max(3, Math.round((rect.top + edge - drag.lastY) / 4));
+            else if (drag.lastY > rect.bottom - edge) delta = Math.max(3, Math.round((drag.lastY - (rect.bottom - edge)) / 4));
+            if (delta !== 0) {
+                list.scrollTop += delta;
+                updateDropTarget(drag.lastY);
+            }
+            drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
+        };
+
+        const startActiveDrag = event => {
+            drag.active = true;
+            const rect = drag.row.getBoundingClientRect();
+            const hostRect = container.getBoundingClientRect();
+            drag.baseLeft = hostRect.left + container.clientLeft;
+            drag.baseTop = hostRect.top + container.clientTop;
+            drag.offsetY = event.clientY - rect.top;
+            const ghost = drag.row.cloneNode(true);
+            ghost.classList.remove('is-drop-before', 'is-drop-after');
+            ghost.classList.add('auto-rewrite-drag-ghost');
+            ghost.style.width = `${rect.width}px`;
+            ghost.style.left = `${rect.left - drag.baseLeft}px`;
+            ghost.style.top = `${rect.top - drag.baseTop}px`;
+            container.append(ghost);
+            drag.ghost = ghost;
+            drag.row.classList.add('is-dragging');
+            list.classList.add('is-reordering');
+            drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
+        };
+
+        const onPointerMove = event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            drag.lastY = event.clientY;
+            if (!drag.active) {
+                if (Math.abs(event.clientY - drag.startY) < 6 && Math.abs(event.clientX - drag.startX) < 6) return;
+                if (event.pointerType === 'touch' && !drag.fromHandle) { cleanupDrag(); return; }
+                startActiveDrag(event);
+            }
+            event.preventDefault();
+            if (drag.ghost) drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
+            updateDropTarget(event.clientY);
+        };
+
+        const onPointerUp = event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            const { active, entryId: dragId, targetId, position } = drag;
+            cleanupDrag();
+            if (!active) return;
+            suppressClickUntil = Date.now() + 250;
+            if (dragId && targetId && position) onReorder(dragId, targetId, position);
+        };
+
+        const onPointerCancel = event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            cleanupDrag();
+        };
+
+        list.addEventListener('pointerdown', event => {
+            if (event.button !== 0 && event.pointerType === 'mouse') return;
+            const row = event.target.closest(`${rowSelector}[data-entry-id]`);
+            if (!row) return;
+            if (ignoreSelector && event.target.closest(ignoreSelector)) return;
+            const fromHandle = Boolean(handleSelector && event.target.closest(handleSelector));
+            if (event.pointerType === 'touch' && !fromHandle) return;
+            if (list.querySelectorAll(`${rowSelector}[data-entry-id]`).length < 2) return;
+            if (fromHandle) event.preventDefault();
+            drag = {
+                pointerId: event.pointerId,
+                row,
+                entryId: row.dataset.entryId,
+                fromHandle,
+                startX: event.clientX,
+                startY: event.clientY,
+                lastY: event.clientY,
+                offsetY: 0,
+                active: false,
+                ghost: null,
+                targetId: null,
+                position: null,
+                scrollFrame: 0,
+            };
+            window.addEventListener('pointermove', onPointerMove, true);
+            window.addEventListener('pointerup', onPointerUp, true);
+            window.addEventListener('pointercancel', onPointerCancel, true);
+        });
+
+        list.addEventListener('click', event => {
+            if (Date.now() < suppressClickUntil) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        }, true);
+
+        return cleanupDrag;
+    }
+
     function summary() {
         const root = el('section', 'auto-rewrite-library-summary');
         root.dataset.feedbackLibrary = '';
         root.innerHTML = `<div class="auto-rewrite-library-summary-heading"><div><i class="fa-solid fa-book-bookmark" aria-hidden="true"></i><b>修改意见仓库</b><span class="auto-rewrite-library-count" data-count></span></div><button type="button" class="auto-rewrite-library-manage"><i class="fa-solid fa-sliders" aria-hidden="true"></i>打开仓库</button></div>
-            <div class="auto-rewrite-library-active" data-active></div>
+            <div class="auto-rewrite-summary-list" data-active></div>
             <details class="auto-rewrite-library-preview"><summary>预览修改意见</summary><p class="auto-rewrite-library-context" data-context></p><div class="ar-md-preview-box ar-live-view" data-preview></div></details>`;
-        root.querySelector('button').addEventListener('click', () => open());
+        root.querySelector('.auto-rewrite-library-manage').addEventListener('click', () => open());
+        bindDragReorder({
+            list: root.querySelector('[data-active]'),
+            container: root,
+            rowSelector: '.auto-rewrite-summary-row',
+            handleSelector: '.auto-rewrite-summary-drag',
+            ignoreSelector: '.auto-rewrite-quick-toggle',
+            onReorder: (dragId, targetId, position) => {
+                if (reorderEntry(getSettings(), dragId, targetId, position)) persist();
+            },
+        });
         summaries.add(root);
         updateSummary(root, composedFeedback(getSettings()));
         return root;
     }
 
     function updateSummary(root, composition) {
-        const signature = JSON.stringify([contextLabel(composition.context), composition.entries.map(entry => [entry.id, entry.name, entry.order])]);
+        const ordered = sortedEntries(getSettings());
+        const signature = JSON.stringify([contextLabel(composition.context), ordered.map(entry =>
+            [entry.id, entry.name, entry.order, entry.enabled, entry.always, matchEntry(entry, composition.context)])]);
         if (root.dataset.signature !== signature) {
             root.dataset.signature = signature;
-            root.querySelector('[data-count]').textContent = `${composition.entries.length} 条生效`;
+            root.querySelector('[data-count]').textContent = `${composition.entries.length} / ${ordered.length} 生效`;
             root.querySelector('[data-context]').textContent = contextLabel(composition.context);
             const active = root.querySelector('[data-active]');
-            active.replaceChildren(...composition.entries.map(entry => {
-                const button = el('button', 'auto-rewrite-library-active-chip');
-                button.type = 'button';
-                button.textContent = entry.name || '未命名条目';
-                button.addEventListener('click', () => open(entry.id));
-                return button;
+            const oldScroll = active.scrollTop;
+            active.replaceChildren(...ordered.map(entry => {
+                const state = matchEntry(entry, composition.context);
+                const row = el('div', 'auto-rewrite-summary-row');
+                row.dataset.entryId = entry.id;
+                row.dataset.active = String(state.active);
+                row.dataset.enabled = String(entry.enabled);
+                const handle = el('span', 'auto-rewrite-summary-drag');
+                handle.title = '按住上下拖动调整顺序';
+                handle.setAttribute('aria-hidden', 'true');
+                handle.innerHTML = '<i class="fa-solid fa-grip-vertical"></i>';
+                const pick = el('button', 'auto-rewrite-summary-row-pick');
+                pick.type = 'button';
+                pick.title = `${entry.name || '未命名条目'} · 点击打开编辑`;
+                pick.append(el('span', 'auto-rewrite-summary-order', String(entry.order)));
+                const name = el('span', 'auto-rewrite-summary-name', entry.name || '未命名条目');
+                const status = el('small', state.active ? 'is-active' : '', state.reason);
+                pick.append(name, status);
+                pick.addEventListener('click', () => open(entry.id));
+                const toggle = el('label', 'auto-rewrite-quick-toggle');
+                const checkbox = el('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = entry.enabled;
+                checkbox.setAttribute('aria-label', `启用${entry.name || '条目'}`);
+                checkbox.addEventListener('change', () => { entry.enabled = checkbox.checked; persist(); });
+                toggle.append(checkbox);
+                row.append(handle, pick, toggle);
+                return row;
             }));
-            if (!composition.entries.length) active.append(el('p', 'auto-rewrite-library-empty-inline', '暂无生效条目，请启用常驻条目或设置预设、角色绑定。'));
+            if (!ordered.length) active.append(el('p', 'auto-rewrite-library-empty-inline', '仓库还是空的，点击“打开仓库”新建修改意见。'));
+            active.scrollTop = oldScroll;
         }
         const preview = root.querySelector('[data-preview]');
         const text = composition.text || '';
@@ -592,152 +772,16 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
 
     /** Pointer-based vertical drag reordering for sidebar rows (desktop & touch). */
     function setupListDrag(shell) {
-        const list = shell.querySelector('[data-list]');
-        let drag = null;
-        let suppressClickUntil = 0;
-
-        const clearIndicators = () => {
-            for (const row of list.querySelectorAll('.auto-rewrite-library-row')) {
-                row.classList.remove('is-drop-before', 'is-drop-after');
-            }
-        };
-
-        const cleanupDrag = () => {
-            if (!drag) return;
-            if (drag.scrollFrame) cancelAnimationFrame(drag.scrollFrame);
-            drag.row?.classList.remove('is-dragging');
-            drag.ghost?.remove();
-            list.classList.remove('is-reordering');
-            clearIndicators();
-            window.removeEventListener('pointermove', onPointerMove, true);
-            window.removeEventListener('pointerup', onPointerUp, true);
-            window.removeEventListener('pointercancel', onPointerCancel, true);
-            drag = null;
-        };
-
-        const updateDropTarget = clientY => {
-            clearIndicators();
-            const rows = [...list.querySelectorAll('.auto-rewrite-library-row')]
-                .filter(row => row.dataset.entryId && row.dataset.entryId !== drag.entryId);
-            if (!rows.length) { drag.targetId = null; drag.position = null; return; }
-            let targetRow = rows[rows.length - 1];
-            let position = 'after';
-            for (const row of rows) {
-                const rect = row.getBoundingClientRect();
-                const mid = rect.top + rect.height / 2;
-                if (clientY < mid) {
-                    targetRow = row;
-                    position = 'before';
-                    break;
-                }
-            }
-            drag.targetId = targetRow.dataset.entryId;
-            drag.position = position;
-            targetRow.classList.add(position === 'before' ? 'is-drop-before' : 'is-drop-after');
-        };
-
-        const tickAutoScroll = () => {
-            if (!drag?.active) return;
-            const rect = list.getBoundingClientRect();
-            const edge = 36;
-            let delta = 0;
-            if (drag.lastY < rect.top + edge) delta = -Math.max(3, Math.round((rect.top + edge - drag.lastY) / 4));
-            else if (drag.lastY > rect.bottom - edge) delta = Math.max(3, Math.round((drag.lastY - (rect.bottom - edge)) / 4));
-            if (delta !== 0) {
-                list.scrollTop += delta;
-                updateDropTarget(drag.lastY);
-            }
-            drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
-        };
-
-        const startActiveDrag = event => {
-            drag.active = true;
-            const rect = drag.row.getBoundingClientRect();
-            const shellRect = shell.getBoundingClientRect();
-            drag.baseLeft = shellRect.left + shell.clientLeft;
-            drag.baseTop = shellRect.top + shell.clientTop;
-            drag.offsetY = event.clientY - rect.top;
-            const ghost = drag.row.cloneNode(true);
-            ghost.classList.remove('is-drop-before', 'is-drop-after');
-            ghost.classList.add('auto-rewrite-drag-ghost');
-            ghost.style.width = `${rect.width}px`;
-            ghost.style.left = `${rect.left - drag.baseLeft}px`;
-            ghost.style.top = `${rect.top - drag.baseTop}px`;
-            shell.append(ghost);
-            drag.ghost = ghost;
-            drag.row.classList.add('is-dragging');
-            list.classList.add('is-reordering');
-            drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
-        };
-
-        const onPointerMove = event => {
-            if (!drag || event.pointerId !== drag.pointerId) return;
-            drag.lastY = event.clientY;
-            if (!drag.active) {
-                if (Math.abs(event.clientY - drag.startY) < 6 && Math.abs(event.clientX - drag.startX) < 6) return;
-                if (event.pointerType === 'touch' && !drag.fromHandle) { cleanupDrag(); return; }
-                startActiveDrag(event);
-            }
-            event.preventDefault();
-            if (drag.ghost) drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
-            updateDropTarget(event.clientY);
-        };
-
-        const onPointerUp = event => {
-            if (!drag || event.pointerId !== drag.pointerId) return;
-            const { active, entryId: dragId, targetId, position } = drag;
-            cleanupDrag();
-            if (!active) return;
-            suppressClickUntil = Date.now() + 250;
-            if (dragId && targetId && position) {
-                if (reorderEntry(getSettings(), dragId, targetId, position)) {
-                    persist();
-                }
-            }
-        };
-
-        const onPointerCancel = event => {
-            if (!drag || event.pointerId !== drag.pointerId) return;
-            cleanupDrag();
-        };
-
-        list.addEventListener('pointerdown', event => {
-            if (event.button !== 0 && event.pointerType === 'mouse') return;
-            const row = event.target.closest('.auto-rewrite-library-row[data-entry-id]');
-            if (!row) return;
-            if (event.target.closest('.auto-rewrite-quick-toggle')) return;
-            const fromHandle = Boolean(event.target.closest('.auto-rewrite-drag-handle'));
-            if (event.pointerType === 'touch' && !fromHandle) return;
-            if (list.querySelectorAll('.auto-rewrite-library-row[data-entry-id]').length < 2) return;
-            if (fromHandle) event.preventDefault();
-            drag = {
-                pointerId: event.pointerId,
-                row,
-                entryId: row.dataset.entryId,
-                fromHandle,
-                startX: event.clientX,
-                startY: event.clientY,
-                lastY: event.clientY,
-                offsetY: 0,
-                active: false,
-                ghost: null,
-                targetId: null,
-                position: null,
-                scrollFrame: 0,
-            };
-            window.addEventListener('pointermove', onPointerMove, true);
-            window.addEventListener('pointerup', onPointerUp, true);
-            window.addEventListener('pointercancel', onPointerCancel, true);
+        return bindDragReorder({
+            list: shell.querySelector('[data-list]'),
+            container: shell,
+            rowSelector: '.auto-rewrite-library-row',
+            handleSelector: '.auto-rewrite-drag-handle',
+            ignoreSelector: '.auto-rewrite-quick-toggle',
+            onReorder: (dragId, targetId, position) => {
+                if (reorderEntry(getSettings(), dragId, targetId, position)) persist();
+            },
         });
-
-        list.addEventListener('click', event => {
-            if (Date.now() < suppressClickUntil) {
-                event.preventDefault();
-                event.stopPropagation();
-            }
-        }, true);
-
-        return cleanupDrag;
     }
 
     function open(id) {
