@@ -12,86 +12,211 @@ const contextLabel = context => `预设：${context.preset?.name || '未选择'}
 const escapeHtml = text => String(text ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 
-/**
- * Metric-preserving inline Markdown highlighter.
- * Only adjusts color, opacity, background, and zero-width text-shadow weight so
- * every glyph keeps identical width/height to the overlaid native <textarea>.
- */
-function highlightInline(escaped) {
+/** Render inline Markdown while preserving prompt tags like <content> and highlighting {{user}} macros. */
+function renderInlineMarkdown(escaped) {
     const stash = [];
     const hold = html => `\u0000${stash.push(html) - 1}\u0000`;
     let out = escaped;
-    // Inline code `...`
-    out = out.replace(/(`)([^`\n]+)(`)/g, (_, a, body, b) =>
-        hold(`<span class="ar-md-code"><span class="ar-md-mark">${a}</span>${body}<span class="ar-md-mark">${b}</span></span>`));
-    // Tavern macros {{user}}, {{char}}, etc.
-    out = out.replace(/(\{\{[^{}\n]+\}\})/g, (_, macro) =>
-        hold(`<span class="ar-md-macro">${macro}</span>`));
-    // Prompt XML-like tags <content>, </content>, <UpdateVariable>
-    out = out.replace(/(&lt;\/?[A-Za-z][\w:-]*(?:\s[^&<>\n]*)?\/?&gt;)/g, (_, tag) =>
-        hold(`<span class="ar-md-tag">${tag}</span>`));
-    // Markdown links [text](url)
-    out = out.replace(/(\[)([^\]\n]+)(\]\()((?:https?:\/\/)[^\s)]+)(\))/g, (_, a, label, b, url, c) =>
-        hold(`<span class="ar-md-mark">${a}</span><span class="ar-md-link">${label}</span><span class="ar-md-mark">${b}${url}${c}</span>`));
-    // Bold **...** and __...__
-    out = out.replace(/(\*\*)([^*\n]+?)(\*\*)/g, (_, a, body, b) =>
-        `<span class="ar-md-strong"><span class="ar-md-mark">${a}</span>${body}<span class="ar-md-mark">${b}</span></span>`);
-    out = out.replace(/(__)([^_\n]+?)(__)/g, (_, a, body, b) =>
-        `<span class="ar-md-strong"><span class="ar-md-mark">${a}</span>${body}<span class="ar-md-mark">${b}</span></span>`);
-    // Strikethrough ~~...~~
-    out = out.replace(/(~~)([^~\n]+?)(~~)/g, (_, a, body, b) =>
-        `<span class="ar-md-del"><span class="ar-md-mark">${a}</span>${body}<span class="ar-md-mark">${b}</span></span>`);
-    // Italic *...*
-    out = out.replace(/(^|[^\w*])(\*)([^*\n]+?)(\*)(?!\*)/g, (_, pre, a, body, b) =>
-        `${pre}<span class="ar-md-em"><span class="ar-md-mark">${a}</span>${body}<span class="ar-md-mark">${b}</span></span>`);
+    out = out.replace(/`([^`\n]+)`/g, (_, code) => hold(`<code>${code}</code>`));
+    out = out.replace(/\{\{([^{}\n]+)\}\}/g, (_, macro) => hold(`<span class="ar-md-macro">{{${macro}}}</span>`));
+    out = out.replace(/(&lt;\/?[A-Za-z][\w:-]*(?:\s[^&<>\n]*)?\/?&gt;)/g, (_, tag) => hold(`<span class="ar-md-tag">${tag}</span>`));
+    out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) =>
+        hold(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`));
+    // Support bold even when wrapping Chinese punctuation like **反例：**
+    out = out.replace(/\*\*([^\n*]+?)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/__([^\n_]+?)__/g, '<strong>$1</strong>');
+    out = out.replace(/~~([^\n~]+?)~~/g, '<del>$1</del>');
+    out = out.replace(/(^|[^\w*])\*([^\n*]+?)\*(?!\*)/g, '$1<em>$2</em>');
     return out.replace(/\u0000(\d+)\u0000/g, (_, index) => stash[Number(index)] ?? '');
 }
 
-/** Line-by-line Markdown highlighter that preserves exact character positions & line breaks. */
-function highlightMarkdown(source) {
+/** Render a Markdown block/document into clean semantic HTML. */
+function renderMarkdown(source) {
     const raw = String(source ?? '').replace(/\r\n?/g, '\n');
+    if (!raw.trim()) return '<p class="ar-md-empty">点击此处开始输入…</p>';
     const lines = raw.split('\n');
-    let inFence = false;
-    const rendered = lines.map(line => {
-        const escaped = escapeHtml(line);
-        if (/^\s*```/.test(line)) {
-            inFence = !inFence;
-            return `<span class="ar-md-fence">${escaped}</span>`;
+    const html = [];
+    let i = 0;
+
+    const isBlockBoundary = line => {
+        const trimmed = line.trim();
+        return !trimmed
+            || /^```/.test(trimmed)
+            || /^#{1,6}\s+/.test(trimmed)
+            || /^(?:---+|\*\*\*+|___+)$/.test(trimmed)
+            || /^>\s?/.test(trimmed)
+            || /^\s*[-*+]\s+/.test(line)
+            || /^\s*\d+\.\s+/.test(line);
+    };
+
+    while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        if (!trimmed) { i++; continue; }
+
+        const fence = trimmed.match(/^```([\w-]*)\s*$/);
+        if (fence) {
+            i++;
+            const codeLines = [];
+            while (i < lines.length && !/^```\s*$/.test(lines[i].trim())) {
+                codeLines.push(lines[i]);
+                i++;
+            }
+            if (i < lines.length) i++;
+            const lang = fence[1] ? ` data-lang="${escapeHtml(fence[1])}"` : '';
+            html.push(`<pre class="ar-md-codeblock"${lang}><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            continue;
         }
-        if (inFence) {
-            return `<span class="ar-md-code-line">${escaped}</span>`;
+
+        if (/^(?:---+|\*\*\*+|___+)$/.test(trimmed)) {
+            html.push('<hr>');
+            i++;
+            continue;
         }
-        // Horizontal rule --- / *** / ___
-        if (/^\s*(?:---+|\*\*\*+|___+)\s*$/.test(line)) {
-            return `<span class="ar-md-hr">${escaped}</span>`;
-        }
-        // Headings # .. ######
-        const heading = escaped.match(/^(\s*)(#{1,6})(\s+)(.*)$/);
+
+        const heading = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*$/);
         if (heading) {
-            const level = Math.min(heading[2].length, 4);
-            return `<span class="ar-md-h ar-md-h${level}">${heading[1]}<span class="ar-md-mark">${heading[2]}</span>${heading[3]}${highlightInline(heading[4])}</span>`;
+            const level = heading[1].length;
+            html.push(`<h${level}>${renderInlineMarkdown(escapeHtml(heading[2]))}</h${level}>`);
+            i++;
+            continue;
         }
-        // Blockquote > ...
-        const quote = escaped.match(/^(\s*)(&gt;)(\s?)(.*)$/);
-        if (quote) {
-            return `<span class="ar-md-quote">${quote[1]}<span class="ar-md-bullet">${quote[2]}</span>${quote[3]}${highlightInline(quote[4])}</span>`;
+
+        if (/^>\s?/.test(trimmed)) {
+            const quoteLines = [];
+            while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+                quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+                i++;
+            }
+            html.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`);
+            continue;
         }
-        // Unordered list - / * / +
-        const ul = escaped.match(/^(\s*)([-*+])(\s+)(.*)$/);
-        if (ul) {
-            return `${ul[1]}<span class="ar-md-bullet">${ul[2]}</span>${ul[3]}${highlightInline(ul[4])}`;
+
+        const listMatch = line.match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+        if (listMatch) {
+            const stack = [];
+            const closeTo = targetIndent => {
+                while (stack.length > 0 && stack[stack.length - 1].indent > targetIndent) {
+                    html.push(`</li></${stack.pop().tag}>`);
+                }
+            };
+            while (i < lines.length) {
+                const match = lines[i].match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+                if (!match) break;
+                const indent = match[1].replace(/\t/g, '  ').length;
+                const tag = match[3] ? 'ol' : 'ul';
+                const startAttr = tag === 'ol' && match[3] !== '1' ? ` start="${Number(match[3])}"` : '';
+                const text = renderInlineMarkdown(escapeHtml(match[4]));
+                if (!stack.length || indent > stack[stack.length - 1].indent) {
+                    html.push(`<${tag}${startAttr}><li>${text}`);
+                    stack.push({ indent, tag });
+                } else {
+                    closeTo(indent);
+                    const top = stack[stack.length - 1];
+                    if (top && top.tag === tag) {
+                        html.push(`</li><li>${text}`);
+                    } else if (top) {
+                        html.push(`</li></${stack.pop().tag}><${tag}${startAttr}><li>${text}`);
+                        stack.push({ indent, tag });
+                    } else {
+                        html.push(`<${tag}${startAttr}><li>${text}`);
+                        stack.push({ indent, tag });
+                    }
+                }
+                i++;
+            }
+            while (stack.length) html.push(`</li></${stack.pop().tag}>`);
+            continue;
         }
-        // Ordered list 1. / 2.
-        const ol = escaped.match(/^(\s*)(\d+\.)(\s+)(.*)$/);
-        if (ol) {
-            return `${ol[1]}<span class="ar-md-bullet">${ol[2]}</span>${ol[3]}${highlightInline(ol[4])}`;
+
+        const para = [];
+        while (i < lines.length && !isBlockBoundary(lines[i])) {
+            para.push(renderInlineMarkdown(escapeHtml(lines[i].trimEnd())));
+            i++;
         }
-        return highlightInline(escaped);
-    });
-    // Trailing zero-width space keeps final empty line height identical to <textarea>.
-    return `${rendered.join('\n')}\u200b`;
+        if (para.length) html.push(`<p>${para.join('<br>')}</p>`);
+        else i++;
+    }
+    return html.join('');
+}
+
+/**
+ * Losslessly split a Markdown document into editable blocks while preserving
+ * the exact separator (`sep`) after every block so joinBlocks(splitBlocks(s)) === s.
+ */
+function splitMarkdownBlocks(source) {
+    const raw = String(source ?? '').replace(/\r\n?/g, '\n');
+    if (!raw) return [{ raw: '', sep: '' }];
+    const lines = raw.split('\n');
+    const blocks = [];
+    let i = 0;
+
+    const lineKind = line => {
+        const trimmed = line.trim();
+        if (!trimmed) return 'blank';
+        if (/^```/.test(trimmed)) return 'fence';
+        if (/^#{1,6}\s+/.test(trimmed)) return 'heading';
+        if (/^(?:---+|\*\*\*+|___+)$/.test(trimmed)) return 'hr';
+        if (/^>\s?/.test(trimmed)) return 'quote';
+        if (/^\s*(?:[-*+]|\d+\.)\s+/.test(line)) return 'list';
+        return 'para';
+    };
+
+    // Preserve any leading blank lines inside the first block's raw text.
+    const leadingBlanks = [];
+    while (i < lines.length && lineKind(lines[i]) === 'blank') {
+        leadingBlanks.push(lines[i]);
+        i++;
+    }
+    if (i >= lines.length) return [{ raw, sep: '' }];
+
+    while (i < lines.length) {
+        const startLines = leadingBlanks.length ? leadingBlanks.splice(0) : [];
+        const kind = lineKind(lines[i]);
+        if (kind === 'fence') {
+            startLines.push(lines[i++]);
+            while (i < lines.length) {
+                startLines.push(lines[i]);
+                if (/^```\s*$/.test(lines[i].trim())) { i++; break; }
+                i++;
+            }
+        } else if (kind === 'heading' || kind === 'hr') {
+            startLines.push(lines[i++]);
+        } else if (kind === 'quote') {
+            while (i < lines.length && lineKind(lines[i]) === 'quote') startLines.push(lines[i++]);
+        } else if (kind === 'list') {
+            while (i < lines.length && lineKind(lines[i]) === 'list') startLines.push(lines[i++]);
+        } else {
+            while (i < lines.length && lineKind(lines[i]) === 'para') startLines.push(lines[i++]);
+        }
+
+        // Capture exact separator up to the next non-blank line (or EOF).
+        let sep = '';
+        if (i < lines.length) {
+            const blanks = [];
+            while (i < lines.length && lineKind(lines[i]) === 'blank') {
+                blanks.push(lines[i++]);
+            }
+            if (i < lines.length) {
+                sep = '\n' + blanks.map(b => `${b}\n`).join('');
+            } else if (blanks.length) {
+                sep = '\n' + blanks.join('\n');
+            }
+        }
+        blocks.push({ raw: startLines.join('\n'), sep });
+    }
+    return blocks;
+}
+
+const joinMarkdownBlocks = blocks => blocks.map(block => `${block.raw}${block.sep}`).join('');
+
+function autoSizeTextarea(textarea) {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.max(30, textarea.scrollHeight)}px`;
 }
 
 export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onOpen }) {
@@ -99,28 +224,174 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     const menu = createMenu();
     let dialog, selected, query = '', filter = 'all', lastDeleted;
     let listSignature, bindingsSignature, disposed = false, mobileView = 'list';
-    let lastHighlightText = null;
+    let sourceMode = false;
+    let blocks = [];
+    let editingBlockIndex = -1;
+    let renderedDocKey = '';
 
     const isMobile = () => globalThis.matchMedia?.('(max-width: 700px)').matches ?? false;
 
-    function syncHighlight(text) {
-        if (!dialog) return;
-        const value = String(text ?? '');
-        const countNode = dialog.querySelector('[data-content-count]');
-        if (countNode) countNode.textContent = `${value.length} 字`;
-        if (value === lastHighlightText) return;
-        lastHighlightText = value;
-        const backdrop = dialog.querySelector('[data-md-backdrop]');
-        if (backdrop) backdrop.innerHTML = highlightMarkdown(value);
+    function updateCount(text) {
+        const countNode = dialog?.querySelector('[data-content-count]');
+        if (countNode) countNode.textContent = `${String(text ?? '').length} 字`;
     }
 
-    function syncBackdropScroll() {
+    function commitBlocksToEntry() {
+        const entry = current();
+        if (!entry) return;
+        const nextText = joinMarkdownBlocks(blocks);
+        if (entry.content !== nextText) {
+            entry.content = nextText;
+            renderedDocKey = `${entry.id}\u0000${entry.content}`;
+            updateCount(entry.content);
+            persist();
+        }
+    }
+
+    function renderBlockEditor(forceRebuild = false) {
         if (!dialog) return;
-        const input = dialog.querySelector('[data-content]');
-        const backdrop = dialog.querySelector('[data-md-backdrop]');
-        if (!input || !backdrop) return;
-        backdrop.scrollTop = input.scrollTop;
-        backdrop.scrollLeft = input.scrollLeft;
+        const entry = current();
+        const surface = dialog.querySelector('[data-md-surface]');
+        const sourceBox = dialog.querySelector('[data-content]');
+        const sourceBtn = dialog.querySelector('[data-source-toggle]');
+        if (!surface || !sourceBox) return;
+
+        if (sourceBtn) {
+            sourceBtn.setAttribute('aria-pressed', String(sourceMode));
+            sourceBtn.title = sourceMode ? '返回实时 Markdown 排版编辑' : '切换到整篇纯文本源码（方便全选复制）';
+        }
+        surface.hidden = sourceMode;
+        sourceBox.hidden = !sourceMode;
+
+        const text = entry?.content ?? '';
+        updateCount(text);
+        if (sourceMode) {
+            if (document.activeElement !== sourceBox) sourceBox.value = text;
+            return;
+        }
+
+        const key = `${entry?.id ?? ''}\u0000${text}`;
+        if (!forceRebuild && key === renderedDocKey && editingBlockIndex < 0) return;
+        if (forceRebuild || key !== renderedDocKey) {
+            blocks = splitMarkdownBlocks(text);
+            renderedDocKey = key;
+        }
+
+        const prevScroll = surface.scrollTop;
+        const frag = document.createDocumentFragment();
+        blocks.forEach((block, index) => {
+            const item = el('div', 'ar-live-block');
+            item.dataset.blockIndex = String(index);
+            if (index === editingBlockIndex) {
+                item.classList.add('is-editing');
+                const ta = el('textarea', 'text_pole ar-live-textarea');
+                ta.value = block.raw;
+                ta.rows = 1;
+                ta.spellcheck = false;
+                ta.placeholder = index === 0 && blocks.length === 1 ? '写下希望这一版如何修改…（支持 Markdown 标题、加粗、引用与列表）' : '输入 Markdown 内容…';
+                ta.addEventListener('input', () => {
+                    blocks[index].raw = ta.value;
+                    autoSizeTextarea(ta);
+                    commitBlocksToEntry();
+                });
+                ta.addEventListener('keydown', event => {
+                    if (event.isComposing) return;
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        ta.blur();
+                        return;
+                    }
+                    if (event.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0 && index > 0) {
+                        event.preventDefault();
+                        openBlockForEdit(index - 1, 'end');
+                        return;
+                    }
+                    if (event.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length && index < blocks.length - 1) {
+                        event.preventDefault();
+                        openBlockForEdit(index + 1, 'start');
+                        return;
+                    }
+                    if (event.key === 'Backspace' && ta.selectionStart === 0 && ta.selectionEnd === 0 && index > 0) {
+                        event.preventDefault();
+                        const prevLen = blocks[index - 1].raw.length;
+                        blocks[index - 1].raw = blocks[index - 1].raw + blocks[index].raw;
+                        blocks[index - 1].sep = blocks[index].sep;
+                        blocks.splice(index, 1);
+                        editingBlockIndex = index - 1;
+                        commitBlocksToEntry();
+                        renderBlockEditor(false);
+                        focusActiveBlock(prevLen);
+                    }
+                });
+                ta.addEventListener('blur', () => {
+                    // Defer slightly so clicking another block opens it cleanly without double-flashing.
+                    setTimeout(() => {
+                        if (!dialog || editingBlockIndex !== index) return;
+                        if (document.activeElement && dialog.querySelector('.ar-live-textarea') === document.activeElement) return;
+                        editingBlockIndex = -1;
+                        // Re-split in case user typed blank lines / pasted multiple blocks.
+                        renderBlockEditor(true);
+                    }, 120);
+                });
+                item.append(ta);
+            } else {
+                const view = el('div', 'ar-live-view');
+                view.innerHTML = renderMarkdown(block.raw);
+                view.addEventListener('click', event => {
+                    if (event.target.closest('a')) return;
+                    if (globalThis.getSelection?.()?.toString()) return;
+                    openBlockForEdit(index, 'end');
+                });
+                item.append(view);
+            }
+            frag.append(item);
+        });
+
+        // Clickable tail area to append a new block naturally like Notion/Typora.
+        const tail = el('button', 'ar-live-tail');
+        tail.type = 'button';
+        tail.textContent = blocks.length === 1 && !blocks[0].raw.trim() ? '' : '点击此处继续输入新段落…';
+        tail.addEventListener('click', () => {
+            if (!blocks.length || blocks[blocks.length - 1].raw.trim()) {
+                if (blocks.length && !blocks[blocks.length - 1].sep) {
+                    blocks[blocks.length - 1].sep = '\n\n';
+                }
+                blocks.push({ raw: '', sep: '' });
+            }
+            openBlockForEdit(blocks.length - 1, 'end');
+        });
+        frag.append(tail);
+
+        surface.replaceChildren(frag);
+        surface.scrollTop = prevScroll;
+        const activeTa = surface.querySelector('.ar-live-textarea');
+        if (activeTa) autoSizeTextarea(activeTa);
+    }
+
+    function focusActiveBlock(caret = 'end') {
+        const ta = dialog?.querySelector('.ar-live-textarea');
+        if (!ta) return;
+        autoSizeTextarea(ta);
+        ta.focus({ preventScroll: true });
+        const pos = typeof caret === 'number' ? caret : caret === 'start' ? 0 : ta.value.length;
+        ta.setSelectionRange(pos, pos);
+        ta.scrollIntoView({ block: 'nearest' });
+    }
+
+    function openBlockForEdit(index, caret = 'end') {
+        if (!dialog || sourceMode) return;
+        // Re-split current text first if switching from another edited block that may have gained blank lines.
+        const entry = current();
+        if (entry && editingBlockIndex >= 0 && editingBlockIndex !== index) {
+            const rawJoined = joinMarkdownBlocks(blocks);
+            if (rawJoined !== entry.content) {
+                entry.content = rawJoined;
+                persist();
+            }
+        }
+        editingBlockIndex = Math.max(0, Math.min(index, blocks.length - 1));
+        renderBlockEditor(false);
+        focusActiveBlock(caret);
     }
 
     function setMobileView(view) {
@@ -173,14 +444,14 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     }
 
     function select(id) {
-        menu.close(); selected = id; bindingsSignature = null; lastHighlightText = null;
+        menu.close(); selected = id; bindingsSignature = null; editingBlockIndex = -1; renderedDocKey = '';
         if (isMobile()) setMobileView('editor');
         sync();
     }
 
     function add() {
         const entry = normalizeEntry({ name: '新修改意见', order: 3, always: true });
-        entries().push(entry); selected = entry.id; query = ''; filter = 'all'; lastHighlightText = null;
+        entries().push(entry); selected = entry.id; query = ''; filter = 'all'; editingBlockIndex = -1; renderedDocKey = '';
         if (dialog) dialog.querySelector('[data-search]').value = '';
         setMobileView('editor');
         persist();
@@ -194,7 +465,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         lastDeleted = { entry, index };
         entries().splice(index, 1);
         selected = sortedEntries(getSettings())[0]?.id;
-        lastHighlightText = null;
+        editingBlockIndex = -1; renderedDocKey = '';
         if (isMobile()) setMobileView('list');
         persist();
     }
@@ -202,7 +473,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     function undo() {
         if (!lastDeleted) return;
         entries().splice(Math.min(lastDeleted.index, entries().length), 0, lastDeleted.entry);
-        selected = lastDeleted.entry.id; lastDeleted = null; lastHighlightText = null; persist();
+        selected = lastDeleted.entry.id; lastDeleted = null; editingBlockIndex = -1; renderedDocKey = ''; persist();
     }
 
     function bind(kind, value) {
@@ -248,7 +519,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             if (disposed) return;
             const added = data.entries.map(entry => normalizeEntry({ ...entry, id: entryId() }));
             entries().push(...added); selected = added[0]?.id ?? selected;
-            query = ''; filter = 'all'; lastHighlightText = null;
+            query = ''; filter = 'all'; editingBlockIndex = -1; renderedDocKey = '';
             if (dialog) dialog.querySelector('[data-search]').value = '';
             persist(); globalThis.toastr?.success(`已追加导入 ${added.length} 条修改意见。`);
         } catch (error) { globalThis.toastr?.error(error.message); }
@@ -412,13 +683,13 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 dialog.querySelector('[data-search]').value = '';
                 if (isMobile()) setMobileView('editor');
             }
-            lastHighlightText = null;
+            editingBlockIndex = -1; renderedDocKey = '';
             sync(); dialog.focus(); return;
         }
         onOpen?.();
         selected = entries().some(entry => entry.id === selected) ? selected : sortedEntries(getSettings())[0]?.id;
         mobileView = id && selected ? 'editor' : 'list';
-        listSignature = null; bindingsSignature = null; lastHighlightText = null;
+        listSignature = null; bindingsSignature = null; editingBlockIndex = -1; renderedDocKey = '';
         const shell = el('dialog', 'auto-rewrite-dialog auto-rewrite-library-dialog');
         shell.dataset.mobileView = mobileView;
         shell.setAttribute('aria-label', '修改意见仓库');
@@ -428,13 +699,11 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             <div class="auto-rewrite-library-entry-heading"><input class="text_pole" type="text" data-name placeholder="条目名称" aria-label="条目名称"><label class="auto-rewrite-quick-toggle"><input type="checkbox" data-enabled><span>启用</span></label></div>
             <div class="auto-rewrite-library-content-box">
               <div class="auto-rewrite-content-toolbar">
-                <span class="auto-rewrite-content-title">修改意见<small class="auto-rewrite-content-count" data-content-count>0 字</small></span>
-                <span class="auto-rewrite-md-badge" title="编辑框内直接实时高亮显示 Markdown 格式"><i class="fa-brands fa-markdown" aria-hidden="true"></i>实时格式</span>
+                <span class="auto-rewrite-content-title">修改意见<small class="auto-rewrite-content-count" data-content-count>0 字</small><small class="auto-rewrite-content-tip">点击任意段落直接编辑</small></span>
+                <button type="button" class="auto-rewrite-source-toggle" data-source-toggle aria-pressed="false" title="切换到整篇纯文本源码（方便全选复制）"><i class="fa-solid fa-code" aria-hidden="true"></i><span>源码</span></button>
               </div>
-              <div class="auto-rewrite-md-editor">
-                <div class="auto-rewrite-md-backdrop" data-md-backdrop aria-hidden="true"></div>
-                <textarea class="text_pole auto-rewrite-content-input" data-content rows="9" placeholder="写下希望这一版如何修改…（支持 Markdown 标题、加粗、列表与引用实时高亮）" spellcheck="false" aria-label="修改意见内容"></textarea>
-              </div>
+              <div class="ar-live-surface" data-md-surface></div>
+              <textarea class="text_pole auto-rewrite-source-input" data-content rows="9" placeholder="写下希望这一版如何修改…" spellcheck="false" aria-label="修改意见源码" hidden></textarea>
             </div>
             <details open class="auto-rewrite-entry-options"><summary class="auto-rewrite-disclosure"><b>条目设置</b><span data-scope-label></span></summary>            <div class="auto-rewrite-library-entry-tools"><label>顺序<input class="text_pole" type="number" min="-9999" max="9999" step="1" data-order aria-label="注入顺序"></label><div><button type="button" data-up title="上移条目" aria-label="上移条目"><i class="fa-solid fa-arrow-up" aria-hidden="true"></i></button><button type="button" data-down title="下移条目" aria-label="下移条目"><i class="fa-solid fa-arrow-down" aria-hidden="true"></i></button><button type="button" data-duplicate title="复制条目" aria-label="复制条目"><i class="fa-regular fa-copy" aria-hidden="true"></i></button><button type="button" data-delete title="删除条目，可撤销" aria-label="删除条目"><i class="fa-regular fa-trash-can" aria-hidden="true"></i></button></div></div>
             <div class="auto-rewrite-library-scope" role="group" aria-label="生效范围"><button type="button" data-scope="always"><i class="fa-solid fa-thumbtack" aria-hidden="true"></i>常驻</button><button type="button" data-scope="bound"><i class="fa-solid fa-link" aria-hidden="true"></i>绑定预设 / 角色</button></div>
@@ -448,13 +717,20 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         button('[data-mobile-back]', () => { menu.close(); setMobileView('list'); sync(); });
         button('[data-delete]', remove); button('[data-undo]', undo); button('[data-export]', exportLibrary);
         button('[data-import]', () => shell.querySelector('[data-file]').click());
+        button('[data-source-toggle]', () => {
+            sourceMode = !sourceMode;
+            editingBlockIndex = -1;
+            renderedDocKey = '';
+            renderBlockEditor(true);
+            if (sourceMode) shell.querySelector('[data-content]')?.focus();
+        });
         shell.querySelector('[data-file]').addEventListener('change', event => { void importLibrary(event.target.files?.[0]); event.target.value = ''; });
         button('[data-up]', () => { if (current()) { moveEntry(getSettings(), selected, -1); persist(); } });
         button('[data-down]', () => { if (current()) { moveEntry(getSettings(), selected, 1); persist(); } });
         button('[data-duplicate]', () => {
             const entry = current(); if (!entry) return;
             const copy = normalizeEntry({ ...structuredClone(entry), id: entryId(), name: `${entry.name || '未命名条目'} · 副本`, enabled: false });
-            entries().splice(entries().indexOf(entry) + 1, 0, copy); selected = copy.id; lastHighlightText = null; persist();
+            entries().splice(entries().indexOf(entry) + 1, 0, copy); selected = copy.id; editingBlockIndex = -1; renderedDocKey = ''; persist();
         });
         button('[data-current-preset]', () => bind('presets', bindingContext().preset));
         button('[data-current-character]', () => bind('characters', bindingContext().character));
@@ -462,8 +738,6 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         button('[data-add-character]', event => chooseBinding('characters', event.currentTarget));
         for (const node of shell.querySelectorAll('[data-scope]')) node.addEventListener('click', () => { const entry = current(); if (entry) { entry.always = node.dataset.scope === 'always'; persist(); } });
         for (const node of shell.querySelectorAll('[data-match]')) node.addEventListener('click', () => { const entry = current(); if (entry) { entry.match = node.dataset.match; persist(); } });
-        const contentInput = shell.querySelector('[data-content]');
-        contentInput.addEventListener('scroll', syncBackdropScroll);
         for (const key of ['name', 'content', 'order', 'enabled']) shell.querySelector(`[data-${key}]`).addEventListener(key === 'enabled' ? 'change' : 'input', event => {
             const entry = current(); if (!entry) return;
             if (key === 'order') {
@@ -472,8 +746,8 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 entry.order = Math.max(-9999, Math.min(9999, Math.trunc(value)));
             } else entry[key] = key === 'enabled' ? event.target.checked : event.target.value;
             if (key === 'content') {
-                syncHighlight(entry.content);
-                syncBackdropScroll();
+                renderedDocKey = '';
+                updateCount(entry.content);
             }
             persist();
         });
@@ -489,7 +763,14 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         shell.addEventListener('pointerdown', event => { backdropPressed = event.button === 0 && outside(event); });
         shell.addEventListener('pointercancel', () => { backdropPressed = false; });
         shell.addEventListener('click', event => { const close = backdropPressed && outside(event); backdropPressed = false; if (close) shell.close(); });
-        shell.addEventListener('cancel', event => { if (menu.isOpen()) { event.preventDefault(); menu.close(); } });
+        shell.addEventListener('cancel', event => {
+            if (menu.isOpen()) { event.preventDefault(); menu.close(); return; }
+            if (editingBlockIndex >= 0) {
+                event.preventDefault();
+                editingBlockIndex = -1;
+                renderBlockEditor(true);
+            }
+        });
         shell.addEventListener('close', () => { cleanupDrag(); menu.close(); shell.remove(); if (dialog === shell) dialog = null; });
         if (isMobile()) {
             const options = shell.querySelector('.auto-rewrite-entry-options');
@@ -575,12 +856,11 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         dialog.querySelector('[data-empty]').hidden = Boolean(entry);
         dialog.querySelector('[data-editor]').hidden = !entry;
         if (entry) {
-            for (const key of ['name', 'content', 'order']) {
+            for (const key of ['name', 'order']) {
                 const field = dialog.querySelector(`[data-${key}]`);
                 if (document.activeElement !== field) field.value = entry[key];
             }
-            syncHighlight(entry.content);
-            syncBackdropScroll();
+            renderBlockEditor(false);
             dialog.querySelector('[data-enabled]').checked = entry.enabled;
             dialog.querySelector('[data-scope-label]').textContent = entry.always ? '常驻' : '绑定预设 / 角色';
             for (const node of dialog.querySelectorAll('[data-scope]')) node.setAttribute('aria-pressed', String((node.dataset.scope === 'always') === entry.always));
