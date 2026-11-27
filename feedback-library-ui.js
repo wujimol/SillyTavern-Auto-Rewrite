@@ -477,7 +477,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         root.dataset.feedbackLibrary = '';
         root.innerHTML = `<div class="auto-rewrite-library-summary-heading"><div><i class="fa-solid fa-book-bookmark" aria-hidden="true"></i><b>修改意见仓库</b><span class="auto-rewrite-library-count" data-count></span></div><button type="button" class="auto-rewrite-library-manage"><i class="fa-solid fa-sliders" aria-hidden="true"></i>打开仓库</button></div>
             <div class="auto-rewrite-library-active" data-active></div>
-            <details class="auto-rewrite-library-preview"><summary>预览修改意见</summary><p class="auto-rewrite-library-context" data-context></p><pre data-preview></pre></details>`;
+            <details class="auto-rewrite-library-preview"><summary>预览修改意见</summary><p class="auto-rewrite-library-context" data-context></p><div class="ar-md-preview-box ar-live-view" data-preview></div></details>`;
         root.querySelector('button').addEventListener('click', () => open());
         summaries.add(root);
         updateSummary(root, composedFeedback(getSettings()));
@@ -501,7 +501,11 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             if (!composition.entries.length) active.append(el('p', 'auto-rewrite-library-empty-inline', '暂无生效条目，请启用常驻条目或设置预设、角色绑定。'));
         }
         const preview = root.querySelector('[data-preview]');
-        if (preview.textContent !== composition.text) preview.textContent = composition.text || '当前组合为空';
+        const text = composition.text || '';
+        if (preview.dataset.renderedText !== text) {
+            preview.dataset.renderedText = text;
+            preview.innerHTML = text.trim() ? renderMarkdown(text) : '<p class="ar-md-empty">当前组合为空</p>';
+        }
     }
 
     function select(id) {
@@ -770,7 +774,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             <div class="auto-rewrite-library-scope" role="group" aria-label="生效范围"><button type="button" data-scope="always"><i class="fa-solid fa-thumbtack" aria-hidden="true"></i>常驻</button><button type="button" data-scope="bound"><i class="fa-solid fa-link" aria-hidden="true"></i>绑定预设 / 角色</button></div>
             <section class="auto-rewrite-library-bindings" data-bindings><p data-context></p><div class="auto-rewrite-library-binding-group"><div><b>预设绑定</b><span><button type="button" data-current-preset>绑定当前预设</button><button type="button" data-add-preset aria-haspopup="listbox" aria-expanded="false" title="选择更多预设" aria-label="添加预设绑定"><i class="fa-solid fa-plus" aria-hidden="true"></i></button></span></div><div class="auto-rewrite-library-binding-chips" data-presets></div></div><div class="auto-rewrite-library-binding-group"><div><b>角色绑定</b><span><button type="button" data-current-character>绑定当前角色</button><button type="button" data-add-character aria-haspopup="listbox" aria-expanded="false" title="选择更多角色" aria-label="添加角色绑定"><i class="fa-solid fa-plus" aria-hidden="true"></i></button></span></div><div class="auto-rewrite-library-binding-chips" data-characters></div></div><div class="auto-rewrite-library-match"><button type="button" data-match="any">任一绑定匹配</button><button type="button" data-match="all">预设与角色同时匹配</button></div><p data-match-help></p></section>
 </details></div></main></div>
-            <footer class="auto-rewrite-library-footer"><div class="auto-rewrite-library-undo" data-undo-bar hidden><span data-undo-text></span><button type="button" data-undo>撤销删除</button></div><details class="auto-rewrite-library-preview"><summary><span>当前组合预览</span><small data-composed-count></small></summary><pre data-composed></pre></details></footer><input type="file" data-file accept=".json,application/json" hidden>`;
+            <footer class="auto-rewrite-library-footer"><div class="auto-rewrite-library-undo" data-undo-bar hidden><span data-undo-text></span><button type="button" data-undo>撤销删除</button></div><details class="auto-rewrite-library-preview"><summary><span>当前组合预览</span><small data-composed-count></small></summary><div class="ar-md-preview-box ar-live-view" data-composed></div></details></footer><input type="file" data-file accept=".json,application/json" hidden>`;
         dialog = shell;
         const cleanupDrag = setupListDrag(shell);
         const button = (selector, handler) => shell.querySelector(selector).addEventListener('click', handler);
@@ -1028,7 +1032,11 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         if (lastDeleted) dialog.querySelector('[data-undo-text]').textContent = `已删除“${lastDeleted.entry.name || '未命名条目'}”`;
         dialog.querySelector('[data-composed-count]').textContent = `${composition.entries.length} 条生效 · ${composition.text.length} 字`;
         const preview = dialog.querySelector('[data-composed]');
-        if (preview.textContent !== composition.text) preview.textContent = composition.text || '当前没有生效内容';
+        const composedText = composition.text || '';
+        if (preview.dataset.renderedText !== composedText) {
+            preview.dataset.renderedText = composedText;
+            preview.innerHTML = composedText.trim() ? renderMarkdown(composedText) : '<p class="ar-md-empty">当前没有生效内容</p>';
+        }
     }
 
     return { summary, open, sync, dispose() {
