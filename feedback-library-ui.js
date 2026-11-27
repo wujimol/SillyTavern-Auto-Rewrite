@@ -472,8 +472,8 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     const current = () => entries().find(entry => entry.id === selected);
     const persist = () => { onChange(); sync(); };
 
-    /** Reusable pointer-based vertical drag reordering (desktop & touch, container-relative ghost). */
-    function bindDragReorder({ list, container, rowSelector, handleSelector, ignoreSelector, onReorder }) {
+    /** Reusable pointer-based drag reordering (vertical list or 2D wrapping chip flow). */
+    function bindDragReorder({ list, container, rowSelector, handleSelector, ignoreSelector, flow = false, onReorder }) {
         let drag = null;
         let suppressClickUntil = 0;
 
@@ -496,20 +496,45 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             drag = null;
         };
 
-        const updateDropTarget = clientY => {
+        const updateDropTarget = (clientX, clientY) => {
             clearIndicators();
             const rows = [...list.querySelectorAll(rowSelector)]
                 .filter(row => row.dataset.entryId && row.dataset.entryId !== drag.entryId);
             if (!rows.length) { drag.targetId = null; drag.position = null; return; }
             let targetRow = rows[rows.length - 1];
             let position = 'after';
-            for (const row of rows) {
-                const rect = row.getBoundingClientRect();
-                const mid = rect.top + rect.height / 2;
-                if (clientY < mid) {
-                    targetRow = row;
-                    position = 'before';
-                    break;
+            if (flow) {
+                const measured = rows.map(row => ({ row, rect: row.getBoundingClientRect() }));
+                let lineItems = measured.filter(({ rect }) => clientY >= rect.top - 6 && clientY <= rect.bottom + 6);
+                if (!lineItems.length) {
+                    let bestDist = Infinity;
+                    let bestCenterY = 0;
+                    for (const { rect } of measured) {
+                        const centerY = rect.top + rect.height / 2;
+                        const dist = Math.abs(clientY - centerY);
+                        if (dist < bestDist) { bestDist = dist; bestCenterY = centerY; }
+                    }
+                    lineItems = measured.filter(({ rect }) => Math.abs((rect.top + rect.height / 2) - bestCenterY) < Math.max(18, rect.height * 0.75));
+                }
+                lineItems.sort((a, b) => a.rect.left - b.rect.left);
+                targetRow = lineItems[lineItems.length - 1].row;
+                position = 'after';
+                for (const { row, rect } of lineItems) {
+                    if (clientX < rect.left + rect.width / 2) {
+                        targetRow = row;
+                        position = 'before';
+                        break;
+                    }
+                }
+            } else {
+                for (const row of rows) {
+                    const rect = row.getBoundingClientRect();
+                    const mid = rect.top + rect.height / 2;
+                    if (clientY < mid) {
+                        targetRow = row;
+                        position = 'before';
+                        break;
+                    }
                 }
             }
             drag.targetId = targetRow.dataset.entryId;
@@ -526,7 +551,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             else if (drag.lastY > rect.bottom - edge) delta = Math.max(3, Math.round((drag.lastY - (rect.bottom - edge)) / 4));
             if (delta !== 0) {
                 list.scrollTop += delta;
-                updateDropTarget(drag.lastY);
+                updateDropTarget(drag.lastX, drag.lastY);
             }
             drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
         };
@@ -537,6 +562,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             const hostRect = container.getBoundingClientRect();
             drag.baseLeft = hostRect.left + container.clientLeft;
             drag.baseTop = hostRect.top + container.clientTop;
+            drag.offsetX = event.clientX - rect.left;
             drag.offsetY = event.clientY - rect.top;
             const ghost = drag.row.cloneNode(true);
             ghost.classList.remove('is-drop-before', 'is-drop-after');
@@ -553,15 +579,19 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
 
         const onPointerMove = event => {
             if (!drag || event.pointerId !== drag.pointerId) return;
+            drag.lastX = event.clientX;
             drag.lastY = event.clientY;
             if (!drag.active) {
                 if (Math.abs(event.clientY - drag.startY) < 6 && Math.abs(event.clientX - drag.startX) < 6) return;
-                if (event.pointerType === 'touch' && !drag.fromHandle) { cleanupDrag(); return; }
+                if (event.pointerType === 'touch' && handleSelector && !drag.fromHandle) { cleanupDrag(); return; }
                 startActiveDrag(event);
             }
             event.preventDefault();
-            if (drag.ghost) drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
-            updateDropTarget(event.clientY);
+            if (drag.ghost) {
+                if (flow) drag.ghost.style.left = `${event.clientX - drag.offsetX - drag.baseLeft}px`;
+                drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
+            }
+            updateDropTarget(event.clientX, event.clientY);
         };
 
         const onPointerUp = event => {
@@ -584,7 +614,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             if (!row) return;
             if (ignoreSelector && event.target.closest(ignoreSelector)) return;
             const fromHandle = Boolean(handleSelector && event.target.closest(handleSelector));
-            if (event.pointerType === 'touch' && !fromHandle) return;
+            if (event.pointerType === 'touch' && handleSelector && !fromHandle) return;
             if (list.querySelectorAll(`${rowSelector}[data-entry-id]`).length < 2) return;
             if (fromHandle) event.preventDefault();
             drag = {
@@ -594,7 +624,9 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 fromHandle,
                 startX: event.clientX,
                 startY: event.clientY,
+                lastX: event.clientX,
                 lastY: event.clientY,
+                offsetX: 0,
                 offsetY: 0,
                 active: false,
                 ghost: null,
@@ -621,15 +653,16 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
         const root = el('section', 'auto-rewrite-library-summary');
         root.dataset.feedbackLibrary = '';
         root.innerHTML = `<div class="auto-rewrite-library-summary-heading"><div><i class="fa-solid fa-book-bookmark" aria-hidden="true"></i><b>修改意见仓库</b><span class="auto-rewrite-library-count" data-count></span></div><button type="button" class="auto-rewrite-library-manage"><i class="fa-solid fa-sliders" aria-hidden="true"></i>打开仓库</button></div>
-            <div class="auto-rewrite-summary-list" data-active></div>
+            <div class="auto-rewrite-summary-chips" data-active></div>
             <details class="auto-rewrite-library-preview"><summary>预览修改意见</summary><p class="auto-rewrite-library-context" data-context></p><div class="ar-md-preview-box ar-live-view" data-preview></div></details>`;
         root.querySelector('.auto-rewrite-library-manage').addEventListener('click', () => open());
         bindDragReorder({
             list: root.querySelector('[data-active]'),
             container: root,
-            rowSelector: '.auto-rewrite-summary-row',
-            handleSelector: '.auto-rewrite-summary-drag',
-            ignoreSelector: '.auto-rewrite-quick-toggle',
+            rowSelector: '.auto-rewrite-summary-chip',
+            handleSelector: '.auto-rewrite-chip-grip',
+            ignoreSelector: '.auto-rewrite-chip-edit',
+            flow: true,
             onReorder: (dragId, targetId, position) => {
                 if (reorderEntry(getSettings(), dragId, targetId, position)) persist();
             },
@@ -648,37 +681,45 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             root.querySelector('[data-count]').textContent = `${composition.entries.length} / ${ordered.length} 生效`;
             root.querySelector('[data-context]').textContent = contextLabel(composition.context);
             const active = root.querySelector('[data-active]');
-            const oldScroll = active.scrollTop;
             active.replaceChildren(...ordered.map(entry => {
                 const state = matchEntry(entry, composition.context);
-                const row = el('div', 'auto-rewrite-summary-row');
-                row.dataset.entryId = entry.id;
-                row.dataset.active = String(state.active);
-                row.dataset.enabled = String(entry.enabled);
-                const handle = el('span', 'auto-rewrite-summary-drag');
-                handle.title = '按住上下拖动调整顺序';
-                handle.setAttribute('aria-hidden', 'true');
-                handle.innerHTML = '<i class="fa-solid fa-grip-vertical"></i>';
-                const pick = el('button', 'auto-rewrite-summary-row-pick');
-                pick.type = 'button';
-                pick.title = `${entry.name || '未命名条目'} · 点击打开编辑`;
-                pick.append(el('span', 'auto-rewrite-summary-order', String(entry.order)));
-                const name = el('span', 'auto-rewrite-summary-name', entry.name || '未命名条目');
-                const status = el('small', state.active ? 'is-active' : '', state.reason);
-                pick.append(name, status);
-                pick.addEventListener('click', () => open(entry.id));
-                const toggle = el('label', 'auto-rewrite-quick-toggle');
-                const checkbox = el('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = entry.enabled;
-                checkbox.setAttribute('aria-label', `启用${entry.name || '条目'}`);
-                checkbox.addEventListener('change', () => { entry.enabled = checkbox.checked; persist(); });
-                toggle.append(checkbox);
-                row.append(handle, pick, toggle);
-                return row;
+                const chip = el('div', 'auto-rewrite-summary-chip');
+                chip.dataset.entryId = entry.id;
+                chip.dataset.active = String(state.active);
+                chip.dataset.enabled = String(entry.enabled);
+
+                const grip = el('span', 'auto-rewrite-chip-grip');
+                grip.title = '按住拖动调整顺序';
+                grip.setAttribute('aria-hidden', 'true');
+                grip.innerHTML = '<i class="fa-solid fa-grip-vertical"></i>';
+
+                const toggleBtn = el('button', 'auto-rewrite-chip-toggle');
+                toggleBtn.type = 'button';
+                toggleBtn.setAttribute('aria-pressed', String(entry.enabled));
+                toggleBtn.title = `${entry.name || '未命名条目'} · ${state.reason}（顺序 ${entry.order}）\n点击一键${entry.enabled ? '停用' : '启用'}，按住拖动调顺序`;
+                const dot = el('span', 'auto-rewrite-chip-dot');
+                dot.setAttribute('aria-hidden', 'true');
+                const label = el('span', 'auto-rewrite-chip-label', entry.name || '未命名条目');
+                toggleBtn.append(dot, label);
+                toggleBtn.addEventListener('click', () => {
+                    entry.enabled = !entry.enabled;
+                    persist();
+                });
+
+                const editBtn = el('button', 'auto-rewrite-chip-edit');
+                editBtn.type = 'button';
+                editBtn.title = `编辑「${entry.name || '未命名条目'}」`;
+                editBtn.setAttribute('aria-label', `编辑${entry.name || '条目'}`);
+                editBtn.innerHTML = '<i class="fa-solid fa-pen" aria-hidden="true"></i>';
+                editBtn.addEventListener('click', event => {
+                    event.stopPropagation();
+                    open(entry.id);
+                });
+
+                chip.append(grip, toggleBtn, editBtn);
+                return chip;
             }));
             if (!ordered.length) active.append(el('p', 'auto-rewrite-library-empty-inline', '仓库还是空的，点击“打开仓库”新建修改意见。'));
-            active.scrollTop = oldScroll;
         }
         const preview = root.querySelector('[data-preview]');
         const text = composition.text || '';
