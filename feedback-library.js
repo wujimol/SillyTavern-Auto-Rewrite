@@ -100,6 +100,24 @@ export function moveEntry(settings, id, step) {
     [settings.feedbackEntries[source], settings.feedbackEntries[target]] = [neighbor, entry];
 }
 
+export function reorderEntry(settings, dragId, targetId, position = 'before') {
+    if (!dragId || !targetId || dragId === targetId) return false;
+    const ordered = sortedEntries(settings);
+    const from = ordered.findIndex(entry => entry.id === dragId);
+    const target = ordered.findIndex(entry => entry.id === targetId);
+    if (from < 0 || target < 0) return false;
+    const orders = ordered.map(entry => entry.order);
+    const next = [...ordered];
+    const [moved] = next.splice(from, 1);
+    const insertAt = next.findIndex(entry => entry.id === targetId) + (position === 'after' ? 1 : 0);
+    if (insertAt < 0) return false;
+    next.splice(insertAt, 0, moved);
+    if (next.every((entry, index) => entry === ordered[index])) return false;
+    next.forEach((entry, index) => { entry.order = orders[index]; });
+    settings.feedbackEntries = next;
+    return true;
+}
+
 export function rebindCharacter(settings, oldAvatar, newAvatar) {
     if (!oldAvatar || !newAvatar || oldAvatar === newAvatar) return false;
     const ctx = getContext();
