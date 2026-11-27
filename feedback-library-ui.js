@@ -472,35 +472,77 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
     const current = () => entries().find(entry => entry.id === selected);
     const persist = () => { onChange(); sync(); };
 
-    /** Reusable pointer-based drag reordering (vertical list or 2D wrapping chip flow). */
+    /** Reusable pointer-based drag reordering with live FLIP sibling reflow & drop-settle animation. */
     function bindDragReorder({ list, container, rowSelector, handleSelector, ignoreSelector, flow = false, onReorder }) {
         let drag = null;
         let suppressClickUntil = 0;
+        const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
-        const clearIndicators = () => {
-            for (const row of list.querySelectorAll(rowSelector)) {
-                row.classList.remove('is-drop-before', 'is-drop-after');
-            }
-        };
-
-        const cleanupDrag = () => {
-            if (!drag) return;
-            if (drag.scrollFrame) cancelAnimationFrame(drag.scrollFrame);
-            drag.row?.classList.remove('is-dragging');
-            drag.ghost?.remove();
-            list.classList.remove('is-reordering');
-            clearIndicators();
+        const clearDragListeners = () => {
             window.removeEventListener('pointermove', onPointerMove, true);
             window.removeEventListener('pointerup', onPointerUp, true);
             window.removeEventListener('pointercancel', onPointerCancel, true);
+        };
+
+        const cleanupDrag = ({ restoreOrder = false } = {}) => {
+            if (!drag) return;
+            if (drag.scrollFrame) cancelAnimationFrame(drag.scrollFrame);
+            if (restoreOrder && drag.row?.isConnected) {
+                if (drag.originNext && drag.originNext.parentNode === list) drag.originNext.before(drag.row);
+                else list.append(drag.row);
+            }
+            drag.row?.classList.remove('is-dragging');
+            drag.ghost?.remove();
+            list.classList.remove('is-reordering');
+            clearDragListeners();
             drag = null;
         };
 
+        const flipMovePlaceholder = (targetRow, position) => {
+            const placeholder = drag.row;
+            if (!placeholder || !targetRow || targetRow === placeholder) return;
+            if (position === 'before' && targetRow.previousElementSibling === placeholder) return;
+            if (position === 'after' && targetRow.nextElementSibling === placeholder) return;
+
+            const siblings = [...list.querySelectorAll(rowSelector)].filter(node => node !== placeholder);
+            const beforeRects = reducedMotion() ? null : new Map(siblings.map(node => [node, node.getBoundingClientRect()]));
+
+            if (position === 'before') targetRow.before(placeholder);
+            else targetRow.after(placeholder);
+            drag.moved = true;
+            drag.cooldownUntil = Date.now() + 95;
+
+            if (!beforeRects) return;
+            const movedNodes = [];
+            for (const node of siblings) {
+                const prev = beforeRects.get(node);
+                const next = node.getBoundingClientRect();
+                const dx = prev.left - next.left;
+                const dy = prev.top - next.top;
+                if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+                node.style.transition = 'none';
+                node.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+                movedNodes.push(node);
+            }
+            if (!movedNodes.length) return;
+            // Force reflow so browser registers inverted positions before playing the spring transition.
+            void list.offsetHeight;
+            for (const node of movedNodes) {
+                node.style.transition = 'transform 220ms cubic-bezier(.22, 1, .36, 1)';
+                node.style.transform = '';
+                clearTimeout(node._arFlipTimer);
+                node._arFlipTimer = setTimeout(() => {
+                    node.style.transition = '';
+                    node._arFlipTimer = 0;
+                }, 240);
+            }
+        };
+
         const updateDropTarget = (clientX, clientY) => {
-            clearIndicators();
+            if (!drag?.active || Date.now() < drag.cooldownUntil) return;
             const rows = [...list.querySelectorAll(rowSelector)]
-                .filter(row => row.dataset.entryId && row.dataset.entryId !== drag.entryId);
-            if (!rows.length) { drag.targetId = null; drag.position = null; return; }
+                .filter(row => row.dataset.entryId && row !== drag.row);
+            if (!rows.length) return;
             let targetRow = rows[rows.length - 1];
             let position = 'after';
             if (flow) {
@@ -537,9 +579,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                     }
                 }
             }
-            drag.targetId = targetRow.dataset.entryId;
-            drag.position = position;
-            targetRow.classList.add(position === 'before' ? 'is-drop-before' : 'is-drop-after');
+            flipMovePlaceholder(targetRow, position);
         };
 
         const tickAutoScroll = () => {
@@ -565,20 +605,26 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             drag.offsetX = event.clientX - rect.left;
             drag.offsetY = event.clientY - rect.top;
             const ghost = drag.row.cloneNode(true);
-            ghost.classList.remove('is-drop-before', 'is-drop-after');
             ghost.classList.add('auto-rewrite-drag-ghost');
             ghost.style.width = `${rect.width}px`;
+            ghost.style.height = `${rect.height}px`;
             ghost.style.left = `${rect.left - drag.baseLeft}px`;
             ghost.style.top = `${rect.top - drag.baseTop}px`;
             container.append(ghost);
             drag.ghost = ghost;
             drag.row.classList.add('is-dragging');
             list.classList.add('is-reordering');
+            // Trigger lift-off pop on next frame so scale + shadow animate smoothly.
+            requestAnimationFrame(() => {
+                if (drag?.ghost === ghost) ghost.classList.add('is-lifted');
+            });
             drag.scrollFrame = requestAnimationFrame(tickAutoScroll);
         };
 
         const onPointerMove = event => {
             if (!drag || event.pointerId !== drag.pointerId) return;
+            const vx = event.clientX - drag.lastX;
+            const vy = event.clientY - drag.lastY;
             drag.lastX = event.clientX;
             drag.lastY = event.clientY;
             if (!drag.active) {
@@ -590,22 +636,67 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             if (drag.ghost) {
                 if (flow) drag.ghost.style.left = `${event.clientX - drag.offsetX - drag.baseLeft}px`;
                 drag.ghost.style.top = `${event.clientY - drag.offsetY - drag.baseTop}px`;
+                if (!reducedMotion()) {
+                    const tilt = Math.max(-3.5, Math.min(3.5, (flow ? vx : vy * 0.45) * 0.25));
+                    drag.ghost.style.setProperty('--ar-drag-tilt', `${tilt.toFixed(2)}deg`);
+                }
             }
             updateDropTarget(event.clientX, event.clientY);
         };
 
+        const commitFinalOrder = (dragId, row) => {
+            const next = row.nextElementSibling;
+            const prev = row.previousElementSibling;
+            if (next?.matches?.(`${rowSelector}[data-entry-id]`)) {
+                onReorder(dragId, next.dataset.entryId, 'before');
+            } else if (prev?.matches?.(`${rowSelector}[data-entry-id]`)) {
+                onReorder(dragId, prev.dataset.entryId, 'after');
+            }
+            // Brief settle highlight on the newly placed item.
+            requestAnimationFrame(() => {
+                const placed = list.querySelector(`${rowSelector}[data-entry-id="${CSS.escape(dragId)}"]`);
+                if (!placed || reducedMotion()) return;
+                placed.classList.add('is-just-dropped');
+                setTimeout(() => placed.classList.remove('is-just-dropped'), 360);
+            });
+        };
+
         const onPointerUp = event => {
             if (!drag || event.pointerId !== drag.pointerId) return;
-            const { active, entryId: dragId, targetId, position } = drag;
-            cleanupDrag();
-            if (!active) return;
-            suppressClickUntil = Date.now() + 250;
-            if (dragId && targetId && position) onReorder(dragId, targetId, position);
+            const activeDrag = drag;
+            if (!activeDrag.active) { cleanupDrag(); return; }
+            suppressClickUntil = Date.now() + 260;
+            if (activeDrag.scrollFrame) cancelAnimationFrame(activeDrag.scrollFrame);
+            clearDragListeners();
+            drag = null;
+
+            const finalize = () => {
+                activeDrag.row?.classList.remove('is-dragging');
+                activeDrag.ghost?.remove();
+                list.classList.remove('is-reordering');
+                if (activeDrag.moved && activeDrag.row?.isConnected) {
+                    commitFinalOrder(activeDrag.entryId, activeDrag.row);
+                }
+            };
+
+            if (activeDrag.ghost && activeDrag.row?.isConnected && !reducedMotion()) {
+                const targetRect = activeDrag.row.getBoundingClientRect();
+                const hostRect = container.getBoundingClientRect();
+                const baseLeft = hostRect.left + container.clientLeft;
+                const baseTop = hostRect.top + container.clientTop;
+                activeDrag.ghost.classList.add('is-settling');
+                activeDrag.ghost.style.setProperty('--ar-drag-tilt', '0deg');
+                activeDrag.ghost.style.left = `${targetRect.left - baseLeft}px`;
+                activeDrag.ghost.style.top = `${targetRect.top - baseTop}px`;
+                setTimeout(finalize, 175);
+            } else {
+                finalize();
+            }
         };
 
         const onPointerCancel = event => {
             if (!drag || event.pointerId !== drag.pointerId) return;
-            cleanupDrag();
+            cleanupDrag({ restoreOrder: true });
         };
 
         list.addEventListener('pointerdown', event => {
@@ -620,6 +711,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             drag = {
                 pointerId: event.pointerId,
                 row,
+                originNext: row.nextElementSibling,
                 entryId: row.dataset.entryId,
                 fromHandle,
                 startX: event.clientX,
@@ -629,9 +721,9 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
                 offsetX: 0,
                 offsetY: 0,
                 active: false,
+                moved: false,
+                cooldownUntil: 0,
                 ghost: null,
-                targetId: null,
-                position: null,
                 scrollFrame: 0,
             };
             window.addEventListener('pointermove', onPointerMove, true);
@@ -646,7 +738,7 @@ export function createFeedbackLibraryUI({ getSettings, createMenu, onChange, onO
             }
         }, true);
 
-        return cleanupDrag;
+        return () => cleanupDrag({ restoreOrder: true });
     }
 
     function summary() {
