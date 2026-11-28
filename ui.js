@@ -47,8 +47,9 @@ function createFloatingMenu() {
         const left = Math.max(pad, Math.min(rect.left, window.innerWidth - width - pad));
         const below = window.innerHeight - rect.bottom - pad - 6;
         const above = rect.top - pad - 6;
-        const placeAbove = below < 100 && above > below;
-        const maxHeight = Math.max(120, Math.min(340, placeAbove ? above : below));
+        const placeAbove = below < 72 && above > below;
+        const avail = Math.max(0, placeAbove ? above : below);
+        const maxHeight = Math.min(340, Math.max(88, avail));
         menu.style.width = `${Math.round(width)}px`;
         menu.style.left = `${Math.round(left)}px`;
         list.style.maxHeight = `${Math.round(maxHeight - (searchWrap.hidden ? 10 : 48))}px`;
