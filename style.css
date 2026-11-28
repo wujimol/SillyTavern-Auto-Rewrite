@@ -304,7 +304,6 @@ button.auto-rewrite-combo-btn.is-loading { opacity: 1; color: #d5cbff; }
 .auto-rewrite-menu-list {
     display: flex; flex-direction: column; gap: 2px; padding: 5px;
     overflow-y: auto; overscroll-behavior: contain;
-    scrollbar-width: thin; scrollbar-color: rgba(182,164,248,.28) transparent;
 }
 .auto-rewrite-menu-list::-webkit-scrollbar { width: 5px; height: 5px; }
 .auto-rewrite-menu-list::-webkit-scrollbar-track { background: transparent; }
