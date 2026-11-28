@@ -43,15 +43,15 @@ function createFloatingMenu() {
     const position = box => {
         const rect = box.getBoundingClientRect();
         const pad = 12;
-        const width = Math.min(Math.max(rect.width, 230), window.innerWidth - pad * 2);
+        const width = Math.min(Math.max(rect.width, 280), window.innerWidth - pad * 2);
         const left = Math.max(pad, Math.min(rect.left, window.innerWidth - width - pad));
         const below = window.innerHeight - rect.bottom - pad - 6;
         const above = rect.top - pad - 6;
-        const placeAbove = below < 185 && above > below;
-        const maxHeight = Math.max(136, Math.min(296, placeAbove ? above : below));
+        const placeAbove = below < 210 && above > below;
+        const maxHeight = Math.max(150, Math.min(340, placeAbove ? above : below));
         menu.style.width = `${Math.round(width)}px`;
         menu.style.left = `${Math.round(left)}px`;
-        list.style.maxHeight = `${Math.round(maxHeight - (searchWrap.hidden ? 12 : 52))}px`;
+        list.style.maxHeight = `${Math.round(maxHeight - (searchWrap.hidden ? 10 : 48))}px`;
         if (placeAbove) {
             menu.style.top = 'auto';
             menu.style.bottom = `${Math.round(window.innerHeight - rect.top + 6)}px`;
@@ -96,14 +96,12 @@ function createFloatingMenu() {
             btn.setAttribute('aria-selected', String(active));
             if (item.disabled) btn.disabled = true;
 
-            const check = document.createElement('i');
-            check.className = 'fa-solid fa-check auto-rewrite-menu-check';
-            check.setAttribute('aria-hidden', 'true');
             const main = document.createElement('span');
             main.className = 'auto-rewrite-menu-text';
             const title = document.createElement('span');
             title.className = 'auto-rewrite-menu-label';
             title.textContent = item.label;
+            title.title = item.label;
             main.append(title);
             if (item.sub && item.sub !== item.label) {
                 const sub = document.createElement('small');
@@ -111,13 +109,17 @@ function createFloatingMenu() {
                 sub.textContent = item.sub;
                 main.append(sub);
             }
-            btn.append(check, main);
+            btn.append(main);
             if (item.tag) {
                 const tag = document.createElement('span');
                 tag.className = 'auto-rewrite-menu-tag';
                 tag.textContent = item.tag;
                 btn.append(tag);
             }
+            const check = document.createElement('i');
+            check.className = 'fa-solid fa-check auto-rewrite-menu-check';
+            check.setAttribute('aria-hidden', 'true');
+            btn.append(check);
             btn.addEventListener('pointerenter', () => { if (!btn.disabled) setHighlight(btn, false); });
             btn.addEventListener('click', () => pickItem(item.value));
             return btn;
@@ -129,8 +131,8 @@ function createFloatingMenu() {
 
     searchInput.addEventListener('input', () => renderItems(searchInput.value));
 
-    const open = ({ anchor, box = anchor, items, value, onPick }) => {
-        if (state?.anchor === anchor) { close(); return; }
+    const open = ({ anchor, box = anchor, items, value, onPick, focusSearch = true, keepOpen = false }) => {
+        if (state?.anchor === anchor) { if (!keepOpen) close(); return; }
         close(true);
         if (!items.length) return;
         state = { anchor, box, items, value, onPick };
@@ -139,6 +141,7 @@ function createFloatingMenu() {
         host.append(menu);
         menu.classList.remove('is-closing');
         searchWrap.hidden = items.length < 7;
+        searchInput.placeholder = `搜索 ${items.filter(i => !i.disabled).length} 个选项…`;
         searchInput.value = '';
         renderItems('');
         menu.hidden = false;
@@ -148,7 +151,7 @@ function createFloatingMenu() {
         position(box);
         const selected = list.querySelector('[aria-selected="true"]');
         if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.offsetTop - list.clientHeight / 2 + selected.offsetHeight / 2);
-        if (!searchWrap.hidden && window.innerWidth > 640) searchInput.focus({ preventScroll: true });
+        if (focusSearch && !searchWrap.hidden && window.innerWidth > 640) searchInput.focus({ preventScroll: true });
     };
 
     const update = ({ anchor, items, value }) => {
@@ -157,6 +160,7 @@ function createFloatingMenu() {
         const scroll = list.scrollTop;
         state.items = items; state.value = value;
         searchWrap.hidden = items.length < 7;
+        searchInput.placeholder = `搜索 ${items.filter(i => !i.disabled).length} 个选项…`;
         renderItems(searchInput.value);
         const previous = [...list.querySelectorAll('.auto-rewrite-menu-item:not(:disabled)')]
             .find(item => item.dataset.value === highlighted);
@@ -168,7 +172,7 @@ function createFloatingMenu() {
     const handlePointerDown = event => {
         if (!state) return;
         const target = event.target;
-        if (target instanceof Node && (menu.contains(target) || state.anchor.contains(target))) return;
+        if (target instanceof Node && (menu.contains(target) || state.anchor.contains(target) || state.box.contains(target))) return;
         close();
     };
     const handleKeyDown = event => {
@@ -294,8 +298,8 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         requests.set(key, request);
         root.dataset[msgKey] = '正在读取模型列表…'; sync();
         try {
-            const models = await fetcher(request.signal);
-            if (requests.get(key) === request) root.dataset[msgKey] = `已获取 ${models.length} 个可选型号，点击 ▾ 可直接筛选选择`;
+            await fetcher(request.signal);
+            if (requests.get(key) === request) delete root.dataset[msgKey];
         } catch (error) {
             if (requests.get(key) === request) root.dataset[msgKey] = request.signal.aborted
                 ? '读取已取消或超时，可以手动填写型号' : error.message;
@@ -311,6 +315,18 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         const seq = ++formSequence;
         root.dataset.formId = String(seq);
         root.innerHTML = `<label class="auto-rewrite-setting-toggle"><span><b>首轮完成后自动重写</b></span><input type="checkbox" data-auto></label>
+            <section class="auto-rewrite-preset-card" aria-label="写作预设">
+                <h4>写作预设</h4>
+                <div class="auto-rewrite-preset-grid">
+                    ${[['firstRoundPreset', '首轮预设', 'fa-feather-pointed'], ['rewritePreset', '重写预设', 'fa-pen-to-square']].map(([key, label, icon]) => `
+                        <div class="auto-rewrite-preset-field">
+                            <span><i class="fa-solid ${icon}" aria-hidden="true"></i>${label}</span>
+                            <button type="button" data-round-preset="${key}" class="auto-rewrite-select-btn" aria-label="${label}" aria-haspopup="listbox" aria-expanded="false">
+                                <span class="auto-rewrite-select-text" data-btn-label></span><span data-btn-tag hidden></span><i class="fa-solid fa-chevron-down auto-rewrite-caret" aria-hidden="true"></i>
+                            </button>
+                        </div>`).join('')}
+                </div>
+            </section>
             <div data-feedback-library-placeholder></div>
             <details open class="auto-rewrite-model-card" aria-label="模型与 API 设置">
                 <summary class="auto-rewrite-disclosure"><b>模型设置</b><span data-route-summary></span></summary>
@@ -335,11 +351,17 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         root.querySelector('[data-auto]').addEventListener('change', event => { onAuto(event.target.checked); sync(); refresh(); });
         root.querySelector('[data-feedback-library-placeholder]').replaceWith(library.summary());
 
-        const openBtnMenu = (btn, onPick, box = btn) => {
+        const openBtnMenu = (btn, onPick, box = btn, opts = {}) => {
             if (btn.disabled) return;
             const items = JSON.parse(btn.dataset.items || '[]');
-            menu.open({ anchor: btn, box, items, value: btn.dataset.value || '', onPick });
+            menu.open({ anchor: btn, box, items, value: btn.dataset.value || '', onPick, ...opts });
         };
+
+        for (const btn of root.querySelectorAll('[data-round-preset]')) {
+            btn.addEventListener('click', () => openBtnMenu(btn, value => {
+                onRoute({ [btn.dataset.roundPreset]: value }); sync();
+            }));
+        }
 
         const mainProfileBtn = root.querySelector('[data-main-profile]');
         mainProfileBtn.addEventListener('click', () => openBtnMenu(mainProfileBtn, id => {
@@ -356,18 +378,21 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
             if (!next || next === getRouting().mainModel) return;
             onMainModel(next);
         };
-        const openMainModels = () => {
+        const openMainModels = (opts = {}) => {
             openBtnMenu(mainPickerBtn, val => {
                 if (!val) return;
                 mainModelInput.value = val;
                 commitMainModel(val);
-            }, mainCombo);
+            }, mainCombo, opts);
             const route = getRouting();
             if (menu.isOpenFor(mainPickerBtn) && route.mainCanFetch && !route.mainCatalogLoaded
                 && !requests.has(`${root.dataset.formId}:main`)) {
                 void triggerRefresh(root, 'main', 'mainModelsMessage', onRefreshMainModels);
             }
         };
+        mainModelInput.addEventListener('click', () => {
+            if (!mainPickerBtn.hidden && !mainPickerBtn.disabled) openMainModels({ keepOpen: true });
+        });
         mainModelInput.addEventListener('change', () => commitMainModel(mainModelInput.value));
         mainModelInput.addEventListener('keydown', event => {
             if (event.key === 'ArrowDown' && !mainPickerBtn.hidden && !mainPickerBtn.disabled) {
@@ -379,7 +404,7 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
             event.preventDefault();
             commitMainModel(mainModelInput.value);
         });
-        mainPickerBtn.addEventListener('click', openMainModels);
+        mainPickerBtn.addEventListener('click', () => openMainModels());
         root.querySelector('[data-refresh-main]').addEventListener('click', () => triggerRefresh(root, 'main', 'mainModelsMessage', onRefreshMainModels));
 
         const profileBtn = root.querySelector('[data-profile]');
@@ -392,17 +417,20 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         const rewriteModelInput = root.querySelector('[data-model]');
         const rewritePickerBtn = root.querySelector('[data-model-picker]');
         const rewriteCombo = rewriteModelInput.closest('.auto-rewrite-combo');
-        const openRewriteModels = () => {
+        const openRewriteModels = (opts = {}) => {
             openBtnMenu(rewritePickerBtn, val => {
                 rewriteModelInput.value = val;
                 onRoute({ model: val }); sync();
-            }, rewriteCombo);
+            }, rewriteCombo, opts);
             const route = getRouting();
             if (menu.isOpenFor(rewritePickerBtn) && route.canFetch && !route.catalogLoaded
                 && !requests.has(`${root.dataset.formId}:rewrite`)) {
                 void triggerRefresh(root, 'rewrite', 'modelsMessage', onRefreshModels);
             }
         };
+        rewriteModelInput.addEventListener('click', () => {
+            if (!rewritePickerBtn.hidden && !rewritePickerBtn.disabled) openRewriteModels({ keepOpen: true });
+        });
         rewriteModelInput.addEventListener('input', event => {
             onRoute({ model: event.target.value }); sync();
         });
@@ -412,7 +440,7 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
                 openRewriteModels();
             }
         });
-        rewritePickerBtn.addEventListener('click', openRewriteModels);
+        rewritePickerBtn.addEventListener('click', () => openRewriteModels());
         root.querySelector('[data-refresh-models]').addEventListener('click', () => triggerRefresh(root, 'rewrite', 'modelsMessage', onRefreshModels));
         forms.add(root);
         return root;
@@ -425,6 +453,16 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
         for (const root of forms) {
             const seq = root.dataset.formId;
             root.querySelector('[data-auto]').checked = settings.auto;
+
+            const names = Array.from(document.querySelectorAll('#settings_preset_openai option'), option => option.text);
+            for (const btn of root.querySelectorAll('[data-round-preset]')) {
+                const selected = settings[btn.dataset.roundPreset] || '';
+                const entries = [{ value: '', label: '跟随酒馆当前预设' }, ...names.map(name => ({ value: name, label: name }))];
+                if (selected && !names.includes(selected)) entries.push({ value: selected, label: selected, tag: '已删除' });
+                setDropdownButton(btn, entries, selected);
+                btn.title = selected || '跟随酒馆当前预设';
+                btn.disabled = busy || !names.length;
+            }
 
             // Main API group
             const mainProfileBtn = root.querySelector('[data-main-profile]');
@@ -440,6 +478,7 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
 
             const mainModel = root.querySelector('[data-main-model]');
             if (document.activeElement !== mainModel) mainModel.value = route.mainModel;
+            mainModel.title = route.mainModel || '选择或输入主模型名称';
             mainModel.placeholder = route.supported ? '选择或输入主模型名称' : '仅聊天补全 API 支持切换主模型';
             mainModel.disabled = busy || !route.mainCanModel;
             const mainPicker = root.querySelector('[data-main-picker]');
@@ -479,6 +518,7 @@ export function createRewriteUI({ getSettings, getView, onVersions, getRouting, 
 
             const model = root.querySelector('[data-model]');
             if (document.activeElement !== model) model.value = settings.model;
+            model.title = settings.model || route.model || '沿用默认型号，或输入模型名称';
             model.placeholder = route.model ? `默认：${route.model}` : '沿用默认型号，或输入模型名称';
             model.disabled = busy || !route.supported;
             const rewritePicker = root.querySelector('[data-model-picker]');
