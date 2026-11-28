@@ -265,6 +265,7 @@ function settings() {
     if (!all[KEY] || typeof all[KEY] !== 'object') all[KEY] = {};
     let changed = false;
     if (typeof all[KEY].auto !== 'boolean') all[KEY].auto = false;
+    if (typeof all[KEY].mvuUpdateVariables !== 'boolean') all[KEY].mvuUpdateVariables = true;
     if (typeof all[KEY].feedback !== 'string' || PREVIOUS_DEFAULT_FEEDBACKS.includes(all[KEY].feedback)) {
         all[KEY].feedback = DEFAULT_FEEDBACK;
         changed = true;
@@ -534,7 +535,8 @@ async function rewrite(attempt, automatic = true, notice = null) {
     const quick = getQuickDraft(attempt.key);
     const quickText = quick.text.trim();
     const quickMode = quick.mode === 'replace' ? 'replace' : 'append';
-    const baseFeedback = composedFeedback(settings()).text;
+    const config = settings();
+    const baseFeedback = composedFeedback(config).text;
     const feedback = quickText
         ? (quickMode === 'replace' || !baseFeedback
             ? quickText
@@ -555,8 +557,8 @@ ${quickText}`)
     running = job;
     setStatus('正在准备重写');
     try {
-        prepareMvu(job);
-        const instruction = feedback + (job.mvu?.active ? mvuFeedback : '');
+        prepareMvu(job, { updateVariables: config.mvuUpdateVariables });
+        const instruction = feedback + (job.mvu?.active && job.mvu.updateVariables ? mvuFeedback : '');
         if (canRewriteInplace()) {
             await prepareInplace(job, instruction);
         } else {
@@ -576,14 +578,14 @@ ${quickText}`)
         if (composerBusy()) {
             throw new Error('输入框中出现了新草稿或附件，本次重写已停止');
         }
-        if (job.mvu?.active) {
+        if (job.mvu?.active && job.mvu.updateVariables) {
             setStatus('等待 MVU 解析窗口');
             await waitMvuWindow(mvuReadyAt, () => sameJob(job) && (job.inplace ? ownsInplace(job) : getContext().chat.at(-1) === job.feedback));
             if (composerBusy()) throw new Error('输入框中出现了新草稿或附件，本次重写已停止');
         }
         // Keep the native event/tool pipeline. CC uses the real swipe handler;
         // older/non-CC installations retain the ordinary-turn fallback.
-        job.route = routing.acquire({ ...settings() }, () => sameJob(job) && job.generating && !mvuBusy());
+        job.route = routing.acquire(config, () => sameJob(job) && job.generating && !mvuBusy());
         job.networkLabelAtStart = document.querySelector('#generation_network_status > [role="status"]');
         job.generating = true;
         setStatus(`${automatic ? '正在自动重写' : '正在重写'} · ${job.route.label}`);
@@ -599,7 +601,7 @@ ${quickText}`)
         if (job.stopRequested && job.stoppedDraft) last = job.stoppedDraft;
         if (!sameJob(job)) throw new Error('重写已取消或聊天已变化');
         if (!last || (!job.inplace && last === job.source) || last.is_user || last.is_system || !last.mes?.trim() || last.mes.trim() === '...') throw new Error('未收到可用的重写正文');
-        if (!job.stopRequested) setStatus(job.mvu?.active ? '正在整理重写稿的 MVU 变量' : '正在保存重写稿');
+        if (!job.stopRequested) setStatus(job.mvu?.active && job.mvu.updateVariables ? '正在整理重写稿的 MVU 变量' : '正在保存重写稿');
         await finishMvu(job, last, () => sameJob(job) && (job.inplace ? ownsInplace(job)
             : job.stopRequested ? ownsTail(job) : getContext().chat.at(-1) === last));
         job.timing.finishedAt ??= Date.now();
@@ -681,6 +683,7 @@ export function enable() {
             if (!running) setStatus(value ? '等待下一次生成' : '自动重写已关闭');
         },
         onQuickChange: updateQuickDraft,
+        onMvuUpdate: value => { settings().mvuUpdateVariables = value; getContext().saveSettingsDebounced(); },
         onLibraryChange: () => { getContext().saveSettingsDebounced(); } });
     ui.install();
     subscribe(events.APP_READY, () => { ui?.install(); void recoverInterrupted(); });
